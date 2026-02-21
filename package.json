@@ -1,0 +1,46 @@
+{
+  "name": "cricket-api",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "eslint \"src/**/*.ts\"",
+    "seed": "ts-node-dev --transpile-only --exit-child src/seed.ts",
+    "auth-check": "ts-node-dev --transpile-only --exit-child src/scripts/authCheck.ts",
+    "tenant-scope-check": "ts-node-dev --transpile-only --exit-child src/scripts/tenantScopeCheck.ts",
+    "tournament-tenant-check": "ts-node-dev --transpile-only --exit-child src/scripts/tournamentTenantCheck.ts",
+    "available-next-batters-check": "ts-node-dev --transpile-only --exit-child src/scripts/availableNextBattersCheck.ts",
+    "seed:tournament-bundle": "ts-node-dev --transpile-only --exit-child src/scripts/seedTournamentBundle.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^8.10.1",
+    "pino": "^10.3.0",
+    "pino-http": "^11.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.1.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.9.3"
+  }
+}
