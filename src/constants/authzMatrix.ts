@@ -132,6 +132,56 @@ export const ENDPOINT_AUTH_MATRIX: EndpointAuthMatrixRow[] = [
   { method: 'GET', path: '/teams/:id', action: null, auth: 'app', area: 'teams' },
   {
     method: 'POST',
+    path: '/teams/:id/access-links',
+    action: 'tournament.manage',
+    auth: 'app',
+    area: 'team-access'
+  },
+  {
+    method: 'GET',
+    path: '/teams/:id/access-links',
+    action: 'tournament.manage',
+    auth: 'app',
+    area: 'team-access'
+  },
+  {
+    method: 'POST',
+    path: '/teams/:id/access-links/whatsapp-share',
+    action: 'tournament.manage',
+    auth: 'app',
+    area: 'team-access'
+  },
+  {
+    method: 'GET',
+    path: '/teams/:id/access-links/current-share',
+    action: 'tournament.manage',
+    auth: 'app',
+    area: 'team-access'
+  },
+  {
+    method: 'DELETE',
+    path: '/teams/:id/access-links/:linkId',
+    action: 'tournament.manage',
+    auth: 'app',
+    area: 'team-access'
+  },
+  { method: 'GET', path: '/team-access/:token/context', action: null, auth: 'app', area: 'team-access' },
+  {
+    method: 'POST',
+    path: '/team-access/:token/players',
+    action: null,
+    auth: 'app',
+    area: 'team-access'
+  },
+  {
+    method: 'PATCH',
+    path: '/team-access/:token/players/:playerId',
+    action: null,
+    auth: 'app',
+    area: 'team-access'
+  },
+  {
+    method: 'POST',
     path: '/teams/:teamId/players',
     action: 'tournament.manage',
     auth: 'app',

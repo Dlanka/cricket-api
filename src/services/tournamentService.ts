@@ -1,5 +1,6 @@
 import { isValidObjectId } from 'mongoose';
 import { TeamModel } from '../models/team';
+import { TeamAccessLinkModel } from '../models/teamAccessLink';
 import { PlayerModel } from '../models/player';
 import { MatchModel } from '../models/match';
 import { MatchPlayerModel } from '../models/matchPlayer';
@@ -1427,8 +1428,14 @@ export const deleteTournament = async (tenantId: string, id: string) => {
     : [];
   const inningsIds = innings.map((entry) => entry._id);
 
-  const [playersDelete, matchPlayersDelete, inningsBattersDelete, inningsBowlersDelete, scoreEventsDelete] =
-    await Promise.all([
+  const [
+    playersDelete,
+    matchPlayersDelete,
+    inningsBattersDelete,
+    inningsBowlersDelete,
+    scoreEventsDelete,
+    teamAccessLinksDelete
+  ] = await Promise.all([
       teamIds.length
         ? PlayerModel.deleteMany({ tenantId, teamId: { $in: teamIds } })
         : Promise.resolve({ deletedCount: 0 }),
@@ -1443,6 +1450,9 @@ export const deleteTournament = async (tenantId: string, id: string) => {
         : Promise.resolve({ deletedCount: 0 }),
       inningsIds.length
         ? ScoreEventModel.deleteMany({ tenantId, inningsId: { $in: inningsIds } })
+        : Promise.resolve({ deletedCount: 0 }),
+      teamIds.length
+        ? TeamAccessLinkModel.deleteMany({ tenantId, teamId: { $in: teamIds } })
         : Promise.resolve({ deletedCount: 0 })
     ]);
 
@@ -1470,7 +1480,8 @@ export const deleteTournament = async (tenantId: string, id: string) => {
       innings: inningsDelete.deletedCount ?? 0,
       inningsBatters: inningsBattersDelete.deletedCount ?? 0,
       inningsBowlers: inningsBowlersDelete.deletedCount ?? 0,
-      scoreEvents: scoreEventsDelete.deletedCount ?? 0
+      scoreEvents: scoreEventsDelete.deletedCount ?? 0,
+      teamAccessLinks: teamAccessLinksDelete.deletedCount ?? 0
     }
   };
 };

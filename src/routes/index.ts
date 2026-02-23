@@ -10,6 +10,7 @@ import { matchRoutes } from './matches';
 import { matchRosterRoutes } from './matchRoster';
 import { inningsReadRoutes } from './inningsRead';
 import { settingsRoutes } from './settings';
+import { teamAccessRoutes } from './teamAccess';
 import { authzRoutes } from './authz';
 
 export const routes = Router();
@@ -27,6 +28,7 @@ routes.use(matchRoutes);
 routes.use(matchRosterRoutes);
 routes.use(inningsReadRoutes);
 routes.use(settingsRoutes);
+routes.use(teamAccessRoutes);
 routes.use(authzRoutes);
 
 routes.get('/api/v1/tenants/me', requireTenant, (req, res) => {

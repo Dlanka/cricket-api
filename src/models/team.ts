@@ -21,6 +21,14 @@ const teamSchema = new Schema(
       type: String,
       trim: true
     },
+    contactPerson: {
+      type: String,
+      trim: true
+    },
+    contactNumber: {
+      type: String,
+      trim: true
+    },
     sourceType: {
       type: String,
       enum: ['TOURNAMENT_TEAM'],

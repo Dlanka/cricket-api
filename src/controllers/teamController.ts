@@ -12,13 +12,28 @@ import {
 
 const createTeamSchema = z.object({
   name: z.string().trim().min(1),
-  shortName: z.string().trim().min(1).optional()
+  shortName: z.string().trim().min(1).optional(),
+  contactPerson: z.string().trim().min(1).optional(),
+  contactNumber: z
+    .string()
+    .trim()
+    .min(1)
+    .regex(/^[+0-9()\-.\s]{6,20}$/)
+    .optional()
 });
 
 const updateTeamSchema = z
   .object({
     name: z.string().trim().min(1).optional(),
-    shortName: z.string().trim().min(1).optional()
+    shortName: z.string().trim().min(1).optional(),
+    contactPerson: z.string().trim().min(1).nullable().optional(),
+    contactNumber: z
+      .string()
+      .trim()
+      .min(1)
+      .regex(/^[+0-9()\-.\s]{6,20}$/)
+      .nullable()
+      .optional()
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: 'At least one field must be provided.'

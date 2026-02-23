@@ -13,7 +13,8 @@ const envSchema = z.object({
   AUTH_COOKIE_NAME: z.string().default('cricket_access'),
   COOKIE_SECURE: z.coerce.boolean().default(false),
   COOKIE_SAMESITE: z.enum(['lax', 'strict', 'none']).default('lax'),
-  COOKIE_DOMAIN: z.string().optional()
+  COOKIE_DOMAIN: z.string().optional(),
+  FRONTEND_BASE_URL: z.string().url().optional()
 });
 
 const parsed = envSchema.safeParse(process.env);

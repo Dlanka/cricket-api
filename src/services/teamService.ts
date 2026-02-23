@@ -1,5 +1,6 @@
 ﻿import { isValidObjectId } from 'mongoose';
 import { TeamModel } from '../models/team';
+import { TeamAccessLinkModel } from '../models/teamAccessLink';
 import { TournamentModel } from '../models/tournament';
 import { AppError } from '../utils/appError';
 import { scopedDeleteOne, scopedFind, scopedFindOne } from '../utils/scopedQuery';
@@ -9,11 +10,15 @@ export type TeamCreateInput = {
   tournamentId: string;
   name: string;
   shortName?: string;
+  contactPerson?: string;
+  contactNumber?: string;
 };
 
 export type TeamUpdateInput = {
   name?: string;
   shortName?: string;
+  contactPerson?: string | null;
+  contactNumber?: string | null;
 };
 
 const ensureObjectId = (id: string, message: string) => {
@@ -42,7 +47,9 @@ export const createTeam = async (input: TeamCreateInput) => {
     tenantId: input.tenantId,
     tournamentId: input.tournamentId,
     name: input.name,
-    shortName: input.shortName
+    shortName: input.shortName,
+    contactPerson: input.contactPerson,
+    contactNumber: input.contactNumber
   });
 
   return team;
@@ -82,6 +89,8 @@ export const updateTeam = async (tenantId: string, id: string, updates: TeamUpda
 
   if (updates.name !== undefined) team.name = updates.name;
   if (updates.shortName !== undefined) team.shortName = updates.shortName;
+  if (updates.contactPerson !== undefined) team.contactPerson = updates.contactPerson ?? undefined;
+  if (updates.contactNumber !== undefined) team.contactNumber = updates.contactNumber ?? undefined;
 
   await team.save();
   return team;
@@ -98,6 +107,7 @@ export const deleteTeam = async (tenantId: string, id: string) => {
   }
 
   await scopedDeleteOne(TeamModel, tenantId, { _id: id });
+  await TeamAccessLinkModel.deleteMany({ tenantId, teamId: id });
 
   return { id };
 };
