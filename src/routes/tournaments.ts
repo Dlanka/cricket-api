@@ -6,6 +6,7 @@ import {
   deleteTournamentHandler,
   generateKnockoutFromLeagueHandler,
   getTournamentHandler,
+  getTournamentPlayerOfSeriesHandler,
   getTournamentStatsHandler,
   getTournamentStandingsHandler,
   listTournamentsHandler,
@@ -27,6 +28,11 @@ tournamentRoutes.get('/tournaments', requireAuthApp, listTournamentsHandler);
 tournamentRoutes.get('/tournaments/:id', requireAuthApp, getTournamentHandler);
 tournamentRoutes.get('/tournaments/:id/standings', requireAuthApp, getTournamentStandingsHandler);
 tournamentRoutes.get('/tournaments/:id/stats', requireAuthApp, getTournamentStatsHandler);
+tournamentRoutes.get(
+  '/tournaments/:id/awards/player-of-series',
+  requireAuthApp,
+  getTournamentPlayerOfSeriesHandler
+);
 
 tournamentRoutes.patch(
   '/tournaments/:id',

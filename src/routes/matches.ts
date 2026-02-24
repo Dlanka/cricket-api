@@ -10,6 +10,9 @@ import {
   getMatchHandler,
   getMatchScoreHandler,
   listMatchesHandler,
+  resolveMatchTieHandler,
+  setMatchTossHandler,
+  startSuperOverHandler,
   startMatchHandler,
   startSecondInningsHandler,
   updateMatchConfigHandler
@@ -40,6 +43,12 @@ matchRoutes.post(
 
 matchRoutes.get('/matches/:matchId', requireAuthApp, getMatchHandler);
 matchRoutes.patch(
+  '/matches/:matchId/toss',
+  requireAuthApp,
+  requireAction('match.start'),
+  setMatchTossHandler
+);
+matchRoutes.patch(
   '/matches/:matchId/config',
   requireAuthApp,
   requireAction('tournament.manage'),
@@ -60,6 +69,13 @@ matchRoutes.post(
   startSecondInningsHandler
 );
 
+matchRoutes.post(
+  '/matches/:matchId/start-super-over',
+  requireAuthApp,
+  requireAction('match.start'),
+  startSuperOverHandler
+);
+
 matchRoutes.get('/matches/:matchId/score', requireAuthApp, getMatchScoreHandler);
 matchRoutes.get('/matches/:matchId/summary', requireAuthApp, getMatchSummaryHandler);
 
@@ -68,6 +84,13 @@ matchRoutes.patch(
   requireAuthApp,
   requireAction('bowler.change'),
   changeCurrentBowlerHandler
+);
+
+matchRoutes.patch(
+  '/matches/:matchId/tie-breaker',
+  requireAuthApp,
+  requireAction('match.start'),
+  resolveMatchTieHandler
 );
 
 matchRoutes.get('/matches/:matchId/available-next-batters', requireAuthApp, getAvailableNextBattersHandler);

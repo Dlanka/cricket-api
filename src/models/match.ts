@@ -32,6 +32,24 @@ const matchResultSchema = new Schema(
   }
 );
 
+const tossSchema = new Schema(
+  {
+    wonByTeamId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Team',
+      required: true
+    },
+    decision: {
+      type: String,
+      enum: ['BAT', 'BOWL'],
+      required: true
+    }
+  },
+  {
+    _id: false
+  }
+);
+
 const matchSchema = new Schema(
   {
     tenantId: {
@@ -90,6 +108,33 @@ const matchSchema = new Schema(
     },
     result: {
       type: matchResultSchema
+    },
+    phase: {
+      type: String,
+      enum: ['REGULAR', 'SUPER_OVER'],
+      default: 'REGULAR'
+    },
+    hasSuperOver: {
+      type: Boolean,
+      default: false
+    },
+    superOverStatus: {
+      type: String,
+      enum: ['PENDING', 'LIVE', 'COMPLETED']
+    },
+    superOverWinnerTeamId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Team'
+    },
+    superOverTie: {
+      type: Boolean,
+      default: false
+    },
+    superOverSetup: {
+      type: Schema.Types.Mixed
+    },
+    toss: {
+      type: tossSchema
     }
   },
   {

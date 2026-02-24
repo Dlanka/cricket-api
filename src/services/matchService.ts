@@ -9,6 +9,7 @@ import { TournamentModel } from '../models/tournament';
 import { InningsBatterModel } from '../models/inningsBatter';
 import { AppError } from '../utils/appError';
 import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
+import { syncKnockoutProgression } from './tournamentService';
 
 const ensureObjectId = (id: string, message: string) => {
   if (!isValidObjectId(id)) {
@@ -296,6 +297,7 @@ export const getTournamentFixturesBracket = async (tenantId: string, tournamentI
           status: match.status,
           teamA: teamMap.get(match.teamAId.toString()) ?? null,
           teamB: match.teamBId ? teamMap.get(match.teamBId.toString()) ?? null : null,
+          resultType: match.result?.type ?? (match.result?.isNoResult ? 'NO_RESULT' : null),
           winnerTeamId: match.result?.winnerTeamId?.toString() ?? null,
           isBye: !match.teamBId
         };
@@ -348,6 +350,7 @@ export const getTournamentFixturesView = async (tenantId: string, tournamentId: 
         teamA: teamMap.get(entry.teamAId?.toString()) ?? null,
         teamB: entry.teamBId ? teamMap.get(entry.teamBId.toString()) ?? null : null,
         result: {
+          type: entry.result?.type ?? (entry.result?.isNoResult ? 'NO_RESULT' : null),
           winnerTeamId: entry.result?.winnerTeamId?.toString() ?? null,
           winByRuns: entry.result?.winByRuns ?? null,
           winByWkts: entry.result?.winByWickets ?? entry.result?.winByWkts ?? null,
@@ -398,6 +401,10 @@ export const getMatchById = async (tenantId: string, matchId: string) => {
     scopedFindOne(TeamModel, tenantId, { _id: match.teamAId }),
     match.teamBId ? scopedFindOne(TeamModel, tenantId, { _id: match.teamBId }) : Promise.resolve(null)
   ]);
+  const superOverInnings = await scopedFind(InningsModel, tenantId, {
+    matchId,
+    inningsNumber: { $in: [3, 4] }
+  });
 
   if (!teamA) {
     throw new AppError('Team not found.', 404, 'team.not_found');
@@ -406,6 +413,22 @@ export const getMatchById = async (tenantId: string, matchId: string) => {
   if (match.teamBId && !teamB) {
     throw new AppError('Team not found.', 404, 'team.not_found');
   }
+
+  const superOverInnings3 = superOverInnings.find((entry) => entry.inningsNumber === 3);
+  const superOverInnings4 = superOverInnings.find((entry) => entry.inningsNumber === 4);
+  const teamARuns =
+    (superOverInnings3?.battingTeamId.toString() === teamA._id.toString()
+      ? superOverInnings3.runs
+      : superOverInnings4?.battingTeamId.toString() === teamA._id.toString()
+        ? superOverInnings4.runs
+        : 0) ?? 0;
+  const teamBRuns =
+    (teamB &&
+    (superOverInnings3?.battingTeamId.toString() === teamB._id.toString()
+      ? superOverInnings3.runs
+      : superOverInnings4?.battingTeamId.toString() === teamB._id.toString()
+        ? superOverInnings4.runs
+        : 0)) ?? 0;
 
   return {
     matchId: match._id.toString(),
@@ -429,7 +452,60 @@ export const getMatchById = async (tenantId: string, matchId: string) => {
     status: match.status,
     stage: match.stage,
     scheduledAt: match.scheduledAt,
+    toss: match.toss
+      ? {
+          wonByTeamId: match.toss.wonByTeamId.toString(),
+          decision: match.toss.decision
+        }
+      : null,
+    phase: match.phase ?? 'REGULAR',
+    hasSuperOver: match.hasSuperOver ?? false,
+    superOverStatus: match.superOverStatus ?? null,
+    superOver: {
+      teamARuns,
+      teamBRuns,
+      winnerTeamId: match.superOverWinnerTeamId?.toString() ?? null,
+      isTie: match.superOverTie ?? false
+    },
     currentInningsId: match.currentInningsId?.toString()
+  };
+};
+
+export const setMatchToss = async (input: SetMatchTossInput) => {
+  ensureObjectId(input.tenantId, 'Invalid tenant id.');
+  ensureObjectId(input.matchId, 'Invalid match id.');
+  ensureObjectId(input.wonByTeamId, 'Invalid toss winner team id.');
+
+  const match = await ensureMatch(input.tenantId, input.matchId);
+
+  if (match.status !== 'SCHEDULED') {
+    throw new AppError('Toss can only be set before match starts.', 409, 'match.invalid_state');
+  }
+
+  const teamAId = match.teamAId.toString();
+  const teamBId = match.teamBId?.toString();
+
+  if (!teamBId) {
+    throw new AppError('Match requires two teams for toss.', 400, 'match.invalid_teams');
+  }
+
+  if (input.wonByTeamId !== teamAId && input.wonByTeamId !== teamBId) {
+    throw new AppError('Toss winner team is invalid for this match.', 400, 'match.team_invalid');
+  }
+
+  match.toss = {
+    wonByTeamId: input.wonByTeamId as unknown as typeof match.teamAId,
+    decision: input.decision
+  };
+  await match.save();
+
+  return {
+    matchId: match._id.toString(),
+    status: match.status,
+    toss: {
+      wonByTeamId: match.toss.wonByTeamId.toString(),
+      decision: match.toss.decision
+    }
   };
 };
 
@@ -474,15 +550,129 @@ export const updateMatchConfig = async (input: UpdateMatchConfigInput) => {
   };
 };
 
-export const generateFixtures = async (tenantId: string, tournamentId: string) => {
+export const resolveMatchTie = async (input: ResolveMatchTieInput) => {
+  ensureObjectId(input.tenantId, 'Invalid tenant id.');
+  ensureObjectId(input.matchId, 'Invalid match id.');
+  ensureObjectId(input.winnerTeamId, 'Invalid winner team id.');
+
+  const match = await ensureMatch(input.tenantId, input.matchId);
+
+  if (!isKnockoutStage(match.stage)) {
+    throw new AppError(
+      'Tie-break winner can be set only for knockout matches.',
+      409,
+      'match.tie_break_not_applicable'
+    );
+  }
+
+  if (match.status !== 'COMPLETED') {
+    throw new AppError('Match must be completed before setting tie-break winner.', 409, 'match.invalid_state');
+  }
+
+  if (match.superOverStatus === 'PENDING' || match.superOverStatus === 'LIVE') {
+    throw new AppError('Super over is pending for this match.', 409, 'match.super_over_pending');
+  }
+
+  if (match.result?.type !== 'TIE') {
+    throw new AppError('Tie-break winner can be set only for tied matches.', 409, 'match.tie_break_not_allowed');
+  }
+
+  if (match.hasSuperOver && match.superOverStatus === 'COMPLETED' && !match.superOverTie) {
+    throw new AppError('Tie-break winner is not allowed once super over is resolved.', 409, 'match.tie_break_not_allowed');
+  }
+
+  const teamAId = match.teamAId.toString();
+  const teamBId = match.teamBId?.toString() ?? null;
+  if (!teamBId || (input.winnerTeamId !== teamAId && input.winnerTeamId !== teamBId)) {
+    throw new AppError('Winner team is invalid for this match.', 400, 'match.team_invalid');
+  }
+
+  match.result = {
+    ...(match.result ?? {}),
+    type: 'WIN',
+    winnerTeamId: input.winnerTeamId as unknown as typeof match.teamAId,
+    winByRuns: undefined,
+    winByWickets: undefined,
+    winByWkts: undefined,
+    isNoResult: false
+  };
+  match.superOverWinnerTeamId = input.winnerTeamId as unknown as typeof match.teamAId;
+  if (match.hasSuperOver) {
+    match.superOverTie = false;
+    match.superOverStatus = 'COMPLETED';
+  }
+  await match.save();
+
+  const progression = await syncKnockoutProgression(
+    input.tenantId,
+    match.tournamentId.toString(),
+    match._id.toString()
+  );
+
+  return {
+    matchId: match._id.toString(),
+    tournamentId: match.tournamentId.toString(),
+    result: {
+      type: match.result.type,
+      winnerTeamId: match.result.winnerTeamId?.toString() ?? null
+    },
+    progression
+  };
+};
+
+export const generateFixtures = async (
+  tenantId: string,
+  tournamentId: string,
+  options?: { regenerate?: boolean }
+) => {
   ensureObjectId(tenantId, 'Invalid tenant id.');
   ensureObjectId(tournamentId, 'Invalid tournament id.');
 
   const tournament = await ensureTournament(tenantId, tournamentId);
 
-  const existing = await scopedFindOne(MatchModel, tenantId, { tournamentId });
-  if (existing) {
-    throw new AppError('Matches already exist for this tournament.', 409, 'match.already_exists');
+  const existingMatches = await scopedFind(MatchModel, tenantId, { tournamentId }).select({
+    _id: 1,
+    status: 1,
+    teamBId: 1
+  });
+
+  if (existingMatches.length > 0) {
+    if (!options?.regenerate) {
+      throw new AppError('Matches already exist for this tournament.', 409, 'match.already_exists', {
+        canRegenerate: true
+      });
+    }
+
+    const startedMatch = existingMatches.find(
+      (entry) =>
+        entry.status === 'LIVE' || (entry.status === 'COMPLETED' && entry.teamBId !== null)
+    );
+    if (startedMatch) {
+      throw new AppError(
+        'Fixtures cannot be regenerated after a match has started.',
+        409,
+        'match.regenerate_blocked'
+      );
+    }
+
+    const existingMatchIds = existingMatches.map((entry) => entry._id);
+    const [inningsExists, scoreEventExists] = await Promise.all([
+      InningsModel.exists({ tenantId, matchId: { $in: existingMatchIds } }),
+      ScoreEventModel.exists({ tenantId, matchId: { $in: existingMatchIds } })
+    ]);
+
+    if (inningsExists || scoreEventExists) {
+      throw new AppError(
+        'Fixtures cannot be regenerated because score data already exists.',
+        409,
+        'match.regenerate_blocked'
+      );
+    }
+
+    await Promise.all([
+      MatchPlayerModel.deleteMany({ tenantId, matchId: { $in: existingMatchIds } }),
+      MatchModel.deleteMany({ tenantId, _id: { $in: existingMatchIds } })
+    ]);
   }
 
   const teams = await scopedFind(TeamModel, tenantId, { tournamentId }).sort({ createdAt: 1 });
@@ -613,11 +803,40 @@ export type ChangeCurrentBowlerInput = {
   bowlerId: string;
 };
 
+export type SetMatchTossInput = {
+  tenantId: string;
+  matchId: string;
+  wonByTeamId: string;
+  decision: 'BAT' | 'BOWL';
+};
+
 export type UpdateMatchConfigInput = {
   tenantId: string;
   matchId: string;
   oversPerInnings?: number;
   ballsPerOver?: number;
+};
+
+export type ResolveMatchTieInput = {
+  tenantId: string;
+  matchId: string;
+  winnerTeamId: string;
+};
+
+export type StartSuperOverInput = {
+  tenantId: string;
+  matchId: string;
+  teamA: {
+    battingFirst: boolean;
+    strikerId: string;
+    nonStrikerId: string;
+    bowlerId: string;
+  };
+  teamB: {
+    strikerId: string;
+    nonStrikerId: string;
+    bowlerId: string;
+  };
 };
 
 export const getAvailableNextBatters = async (tenantId: string, matchId: string) => {
@@ -1027,6 +1246,136 @@ export const startSecondInnings = async (input: StartSecondInningsInput) => {
   };
 };
 
+export const startSuperOver = async (input: StartSuperOverInput) => {
+  ensureObjectId(input.tenantId, 'Invalid tenant id.');
+  ensureObjectId(input.matchId, 'Invalid match id.');
+  ensureObjectId(input.teamA.strikerId, 'Invalid striker id.');
+  ensureObjectId(input.teamA.nonStrikerId, 'Invalid non-striker id.');
+  ensureObjectId(input.teamA.bowlerId, 'Invalid bowler id.');
+  ensureObjectId(input.teamB.strikerId, 'Invalid striker id.');
+  ensureObjectId(input.teamB.nonStrikerId, 'Invalid non-striker id.');
+  ensureObjectId(input.teamB.bowlerId, 'Invalid bowler id.');
+
+  if (input.teamA.strikerId === input.teamA.nonStrikerId) {
+    throw new AppError('Team A striker and non-striker must be different.', 400, 'match.batting_pair_invalid');
+  }
+  if (input.teamB.strikerId === input.teamB.nonStrikerId) {
+    throw new AppError('Team B striker and non-striker must be different.', 400, 'match.batting_pair_invalid');
+  }
+
+  const match = await ensureMatch(input.tenantId, input.matchId);
+  if (!isKnockoutStage(match.stage)) {
+    throw new AppError('Super over is allowed only for knockout matches.', 409, 'match.super_over_not_applicable');
+  }
+
+  if (match.result?.type !== 'TIE') {
+    throw new AppError('Super over can start only after a tied result.', 409, 'match.super_over_invalid_state');
+  }
+
+  if (match.superOverStatus === 'LIVE' || match.superOverStatus === 'COMPLETED') {
+    throw new AppError('Super over is already started for this match.', 409, 'match.super_over_already_started');
+  }
+
+  const teamAId = match.teamAId.toString();
+  const teamBId = match.teamBId?.toString();
+  if (!teamBId) {
+    throw new AppError('Match requires two teams for super over.', 400, 'match.invalid_teams');
+  }
+
+  const firstInnings = await scopedFindOne(InningsModel, input.tenantId, {
+    matchId: input.matchId,
+    inningsNumber: 1
+  });
+  if (!firstInnings) {
+    throw new AppError('Cannot derive super over order without first innings.', 409, 'match.super_over_invalid_state');
+  }
+
+  const requiredBattingFirstTeamId = firstInnings.bowlingTeamId.toString();
+  const selectedBattingFirstTeamId = input.teamA.battingFirst ? teamAId : teamBId;
+  if (selectedBattingFirstTeamId !== requiredBattingFirstTeamId) {
+    throw new AppError(
+      'Super over batting order is invalid. Team batting second in the match must bat first.',
+      409,
+      'match.super_over_invalid_state'
+    );
+  }
+
+  const battingFirstTeamId = requiredBattingFirstTeamId;
+  const bowlingFirstTeamId = battingFirstTeamId === teamAId ? teamBId : teamAId;
+  const battingFirstConfig = battingFirstTeamId === teamAId ? input.teamA : input.teamB;
+  const battingSecondConfig = battingFirstTeamId === teamAId ? input.teamB : input.teamA;
+
+  const [teamARoster, teamBRoster, tournament] = await Promise.all([
+    scopedFind(MatchPlayerModel, input.tenantId, { matchId: input.matchId, teamId: teamAId, isPlaying: true }),
+    scopedFind(MatchPlayerModel, input.tenantId, { matchId: input.matchId, teamId: teamBId, isPlaying: true }),
+    ensureTournament(input.tenantId, match.tournamentId.toString())
+  ]);
+
+  const teamAPlayers = new Set(teamARoster.map((entry) => entry.playerId.toString()));
+  const teamBPlayers = new Set(teamBRoster.map((entry) => entry.playerId.toString()));
+
+  const assertPlayer = (teamId: string, playerId: string, code: 'match.batting_pair_invalid' | 'match.bowler_invalid') => {
+    const roster = teamId === teamAId ? teamAPlayers : teamBPlayers;
+    if (!roster.has(playerId)) {
+      throw new AppError('Super over player must be from playing XI.', 400, code);
+    }
+  };
+
+  assertPlayer(battingFirstTeamId, battingFirstConfig.strikerId, 'match.batting_pair_invalid');
+  assertPlayer(battingFirstTeamId, battingFirstConfig.nonStrikerId, 'match.batting_pair_invalid');
+  assertPlayer(bowlingFirstTeamId, battingFirstConfig.bowlerId, 'match.bowler_invalid');
+  assertPlayer(bowlingFirstTeamId, battingSecondConfig.strikerId, 'match.batting_pair_invalid');
+  assertPlayer(bowlingFirstTeamId, battingSecondConfig.nonStrikerId, 'match.batting_pair_invalid');
+  assertPlayer(battingFirstTeamId, battingSecondConfig.bowlerId, 'match.bowler_invalid');
+
+  const superOverInnings1 = await InningsModel.create({
+    tenantId: input.tenantId,
+    matchId: input.matchId,
+    inningsNumber: 3,
+    battingTeamId: battingFirstTeamId,
+    bowlingTeamId: bowlingFirstTeamId,
+    strikerId: battingFirstConfig.strikerId,
+    nonStrikerId: battingFirstConfig.nonStrikerId,
+    currentBowlerId: battingFirstConfig.bowlerId,
+    runs: 0,
+    wickets: 0,
+    balls: 0,
+    ballsPerOver: match.ballsPerOver ?? tournament.ballsPerOver ?? 6,
+    oversPerInnings: 1,
+    eventSeq: 0,
+    lastSeq: 0,
+    currentOver: {
+      overNumber: 0,
+      legalBallsInOver: 0,
+      balls: []
+    },
+    status: 'LIVE'
+  });
+
+  match.phase = 'SUPER_OVER';
+  match.hasSuperOver = true;
+  match.superOverStatus = 'LIVE';
+  match.superOverWinnerTeamId = undefined;
+  match.superOverTie = false;
+  match.superOverSetup = {
+    battingFirstTeamId,
+    bowlingFirstTeamId,
+    teamA: input.teamA,
+    teamB: input.teamB
+  } as unknown as typeof match.superOverSetup;
+  match.status = 'LIVE';
+  match.currentInningsId = superOverInnings1._id;
+  await match.save();
+
+  return {
+    matchId: match._id.toString(),
+    inningsId: superOverInnings1._id.toString(),
+    inningsNumber: 3,
+    phase: match.phase,
+    superOverStatus: match.superOverStatus
+  };
+};
+
 export const getMatchScore = async (tenantId: string, matchId: string) => {
   ensureObjectId(tenantId, 'Invalid tenant id.');
   ensureObjectId(matchId, 'Invalid match id.');
@@ -1104,6 +1453,15 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
         requiredRunRate: number | null;
       }
     | null = null;
+  let superOverChase:
+    | {
+        targetRuns: number;
+        firstInningsRuns: number;
+        runsRemaining: number;
+        ballsRemaining: number;
+        requiredRunRate: number | null;
+      }
+    | null = null;
 
   if (innings.inningsNumber === 2) {
     const firstInnings = await scopedFindOne(InningsModel, tenantId, {
@@ -1134,6 +1492,30 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
     };
   }
 
+  if (match.phase === 'SUPER_OVER' && innings.inningsNumber === 4) {
+    const superOverFirstInnings = await scopedFindOne(InningsModel, tenantId, {
+      matchId,
+      inningsNumber: 3
+    });
+
+    if (superOverFirstInnings) {
+      const targetRuns = superOverFirstInnings.runs + 1;
+      const maxBalls = ballsPerOver;
+      const ballsRemaining = Math.max(0, maxBalls - innings.balls);
+      const runsRemaining = Math.max(0, targetRuns - innings.runs);
+      const requiredRunRate =
+        ballsRemaining > 0 ? Number((runsRemaining / (ballsRemaining / ballsPerOver)).toFixed(2)) : null;
+
+      superOverChase = {
+        targetRuns,
+        firstInningsRuns: superOverFirstInnings.runs,
+        runsRemaining,
+        ballsRemaining,
+        requiredRunRate
+      };
+    }
+  }
+
   const result = match.result
     ? {
         type: match.result.type ?? (match.result.isNoResult ? 'NO_RESULT' : undefined),
@@ -1143,6 +1525,25 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
         targetRuns: match.result.targetRuns ?? match.secondInningsTarget ?? null
       }
     : null;
+
+  const superOverInnings = await scopedFind(InningsModel, tenantId, {
+    matchId,
+    inningsNumber: { $in: [3, 4] }
+  });
+  const superOverInnings3 = superOverInnings.find((entry) => entry.inningsNumber === 3);
+  const superOverInnings4 = superOverInnings.find((entry) => entry.inningsNumber === 4);
+  const resolveSuperOverRuns = (teamId: string | null) => {
+    if (!teamId) return 0;
+    if (superOverInnings3 && superOverInnings3.battingTeamId.toString() === teamId) {
+      return superOverInnings3.runs;
+    }
+    if (superOverInnings4 && superOverInnings4.battingTeamId.toString() === teamId) {
+      return superOverInnings4.runs;
+    }
+    return 0;
+  };
+  const teamARuns = resolveSuperOverRuns(match.teamAId.toString());
+  const teamBRuns = resolveSuperOverRuns(match.teamBId?.toString() ?? null);
 
   const scoredEvents = await ScoreEventModel.find({
     tenantId,
@@ -1239,8 +1640,18 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
       ballsPerOver,
       oversPerInnings
     },
+    phase: match.phase ?? 'REGULAR',
+    hasSuperOver: match.hasSuperOver ?? false,
+    superOverStatus: match.superOverStatus ?? null,
+    superOver: {
+      teamARuns,
+      teamBRuns,
+      winnerTeamId: match.superOverWinnerTeamId?.toString() ?? null,
+      isTie: match.superOverTie ?? false
+    },
     chase,
-    isChase: innings.inningsNumber === 2,
+    superOverChase,
+    isChase: innings.inningsNumber === 2 || (match.phase === 'SUPER_OVER' && innings.inningsNumber === 4),
     isMatchCompleted: match.status === 'COMPLETED',
     result
   };

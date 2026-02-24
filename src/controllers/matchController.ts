@@ -11,6 +11,9 @@ import {
   getTournamentFixturesBracket,
   getTournamentFixturesView,
   listMatchesByTournament,
+  resolveMatchTie,
+  setMatchToss,
+  startSuperOver,
   startMatch,
   startSecondInnings,
   updateMatchConfig
@@ -41,6 +44,35 @@ const startSecondInningsSchema = z.object({
   nonStrikerId: z.string().min(1),
   bowlerId: z.string().min(1)
 });
+
+const setTossSchema = z.object({
+  wonByTeamId: z.string().min(1),
+  decision: z.enum(['BAT', 'BOWL'])
+});
+
+const startSuperOverSchema = z.object({
+  teamA: z.object({
+    battingFirst: z.boolean(),
+    strikerId: z.string().min(1),
+    nonStrikerId: z.string().min(1),
+    bowlerId: z.string().min(1)
+  }),
+  teamB: z.object({
+    strikerId: z.string().min(1),
+    nonStrikerId: z.string().min(1),
+    bowlerId: z.string().min(1)
+  })
+});
+
+const resolveTieSchema = z.object({
+  winnerTeamId: z.string().min(1)
+});
+
+const generateFixturesSchema = z
+  .object({
+    regenerate: z.coerce.boolean().optional()
+  })
+  .optional();
 
 const updateMatchConfigSchema = z
   .object({
@@ -103,8 +135,11 @@ export const getTournamentFixturesViewHandler = async (
 export const generateFixturesHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { tournamentId } = tournamentIdSchema.parse(req.params);
+    const input = generateFixturesSchema.parse(req.body);
     const tenantId = getTenantId(req);
-    const result = await generateFixtures(tenantId, tournamentId);
+    const result = await generateFixtures(tenantId, tournamentId, {
+      regenerate: input?.regenerate ?? false
+    });
     return res.status(201).json(ok(result));
   } catch (error) {
     return next(error);
@@ -177,6 +212,18 @@ export const changeCurrentBowlerHandler = async (
   }
 };
 
+export const setMatchTossHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const payload = setTossSchema.parse(req.body);
+    const tenantId = getTenantId(req);
+    const result = await setMatchToss({ tenantId, matchId, ...payload });
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const getAvailableNextBattersHandler = async (
   req: Request,
   res: Response,
@@ -203,6 +250,30 @@ export const updateMatchConfigHandler = async (
     const tenantId = getTenantId(req);
     const result = await updateMatchConfig({ tenantId, matchId, ...payload });
     return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const resolveMatchTieHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const { winnerTeamId } = resolveTieSchema.parse(req.body);
+    const tenantId = getTenantId(req);
+    const result = await resolveMatchTie({ tenantId, matchId, winnerTeamId });
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const startSuperOverHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const payload = startSuperOverSchema.parse(req.body);
+    const tenantId = getTenantId(req);
+    const result = await startSuperOver({ tenantId, matchId, ...payload });
+    return res.status(201).json(ok(result));
   } catch (error) {
     return next(error);
   }

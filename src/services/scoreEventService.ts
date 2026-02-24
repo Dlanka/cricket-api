@@ -104,6 +104,10 @@ const ensureCurrentOver = (innings: any) => {
 
 const getMaxLegalBalls = (innings: any, ballsPerOver: number) =>
   (innings.oversPerInnings ?? 0) * ballsPerOver;
+const COMPLETED_MATCH_UNDO_WINDOW_MS = 30 * 60 * 1000;
+
+const isKnockoutStage = (stage?: string | null) =>
+  stage === 'R1' || stage === 'QF' || stage === 'SF' || stage === 'FINAL';
 
 const ensureLiveContext = async (
   tenantId: string,
@@ -703,19 +707,88 @@ const createNextBatter = async (
 };
 
 const applyUndo = async (input: ScoreEventInput) => {
-  const context = await ensureLiveContext(input.tenantId, input.matchId, true);
+  const match = await scopedFindOne(MatchModel, input.tenantId, { _id: input.matchId });
+
+  if (!match) {
+    throw new AppError('Match not found.', 404, 'match.not_found');
+  }
+  if (match.status !== 'LIVE' && match.status !== 'COMPLETED') {
+    throw new AppError('Match is not live.', 409, 'match.invalid_state');
+  }
+
+  if (match.status === 'COMPLETED' && isKnockoutStage(match.stage)) {
+    const stageRank: Record<'R1' | 'QF' | 'SF' | 'FINAL', number> = {
+      R1: 1,
+      QF: 2,
+      SF: 3,
+      FINAL: 4
+    };
+    const thisRound = match.roundNumber ?? 1;
+    const thisStageRank = stageRank[match.stage];
+    const progressedKnockoutMatches = await scopedFind(MatchModel, input.tenantId, {
+      tournamentId: match.tournamentId,
+      _id: { $ne: match._id },
+      stage: { $in: ['R1', 'QF', 'SF', 'FINAL'] },
+      status: { $in: ['LIVE', 'COMPLETED'] }
+    }).select({ stage: 1, roundNumber: 1 });
+
+    const hasDownstreamProgress = progressedKnockoutMatches.some((entry) => {
+      if (!isKnockoutStage(entry.stage)) return false;
+      const otherRound = entry.roundNumber ?? 1;
+      const otherStageRank = stageRank[entry.stage];
+      return otherRound > thisRound || (otherRound === thisRound && otherStageRank > thisStageRank);
+    });
+
+    if (hasDownstreamProgress) {
+      throw new AppError(
+        'Undo is blocked because downstream knockout matches already started.',
+        409,
+        'score.undo_blocked'
+      );
+    }
+  }
 
   const target = await ScoreEventModel.findOne({
     tenantId: input.tenantId,
     matchId: input.matchId,
-    inningsId: context.innings._id,
     type: { $ne: 'undo' },
     isUndone: false
-  }).sort({ seq: -1 });
+  }).sort({ createdAt: -1, seq: -1 });
 
   if (!target) {
     throw new AppError('No event available to undo.', 409, 'score.undo_empty');
   }
+
+  if (
+    match.status === 'COMPLETED' &&
+    Date.now() - new Date(target.createdAt).getTime() > COMPLETED_MATCH_UNDO_WINDOW_MS
+  ) {
+    throw new AppError('Undo window elapsed for completed match.', 409, 'score.undo_window_elapsed', {
+      maxUndoWindowMs: COMPLETED_MATCH_UNDO_WINDOW_MS
+    });
+  }
+
+  const innings = await scopedFindOne(InningsModel, input.tenantId, {
+    _id: target.inningsId,
+    matchId: input.matchId,
+    status: { $in: ['LIVE', 'COMPLETED'] }
+  });
+  if (!innings) {
+    throw new AppError('Innings not found.', 404, 'innings.not_found');
+  }
+  const inningsTournament = await scopedFindOne(TournamentModel, input.tenantId, {
+    _id: match.tournamentId
+  });
+  if (!inningsTournament) {
+    throw new AppError('Tournament not found.', 404, 'tournament.not_found');
+  }
+
+  const context = {
+    match,
+    innings,
+    tournament: inningsTournament,
+    ballsPerOver: innings.ballsPerOver ?? inningsTournament.ballsPerOver ?? 6
+  };
 
   const before = target.beforeSnapshot as Snapshot;
   const after = target.afterSnapshot as Snapshot;
@@ -747,11 +820,44 @@ const applyUndo = async (input: ScoreEventInput) => {
   target.isUndone = true;
   target.undoneAt = new Date();
   target.undoneByUserId = input.createdByUserId;
-  await target.save();
 
   context.innings.eventSeq += 1;
   context.innings.lastSeq = context.innings.eventSeq;
-  await context.innings.save();
+
+  if (before.innings.status === 'LIVE') {
+    context.match.status = 'LIVE';
+    context.match.currentInningsId = context.innings._id;
+    if (context.match.result) {
+      context.match.result = {
+        ...(context.match.result ?? {}),
+        type: undefined,
+        winnerTeamId: undefined,
+        winByRuns: undefined,
+        winByWickets: undefined,
+        winByWkts: undefined
+      };
+    }
+    if (context.match.phase === 'SUPER_OVER') {
+      context.match.superOverStatus = 'LIVE';
+      context.match.superOverTie = false;
+      context.match.superOverWinnerTeamId = undefined;
+    } else {
+      context.match.hasSuperOver = false;
+      context.match.superOverStatus = undefined;
+      context.match.superOverTie = false;
+      context.match.superOverWinnerTeamId = undefined;
+      context.match.superOverSetup = undefined;
+    }
+  }
+
+  await Promise.all([
+    target.save(),
+    context.innings.save(),
+    typeof (context.match as { isModified?: () => boolean }).isModified === 'function' &&
+    context.match.isModified()
+      ? context.match.save()
+      : Promise.resolve()
+  ]);
 
   const undoEvent = await ScoreEventModel.create({
     tenantId: input.tenantId,
@@ -841,6 +947,7 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   let createdBatterStatId: string | undefined;
   let matchCompletedNow = false;
+  let shouldSyncKnockout = false;
 
   if (input.type === 'swap') {
     swapStrike(innings);
@@ -967,7 +1074,9 @@ const applyEvent = async (input: ScoreEventInput) => {
     const wicketExtraType = input.extraType ?? 'none';
     const runs = input.runsWithWicket ?? 0;
     const nextWickets = innings.wickets + 1;
-    const maxWickets = Math.max(0, context.battingIds.size - 1);
+    const isSuperOverInnings =
+      context.match.phase === 'SUPER_OVER' && (innings.inningsNumber === 3 || innings.inningsNumber === 4);
+    const maxWickets = isSuperOverInnings ? 2 : Math.max(0, context.battingIds.size - 1);
     const inningsEndsOnWicket = maxWickets > 0 && nextWickets >= maxWickets;
     const isIllegalWicketDelivery = wicketExtraType === 'wide' || wicketExtraType === 'noBall';
     const penaltyRuns = wicketExtraType === 'wide' || wicketExtraType === 'noBall' ? 1 : 0;
@@ -1124,8 +1233,120 @@ const applyEvent = async (input: ScoreEventInput) => {
         targetRuns: evaluation.result.targetRuns
       };
       context.match.currentInningsId = undefined;
+      context.match.phase = 'REGULAR';
+      if (evaluation.result.type === 'TIE' && isKnockoutStage(context.match.stage)) {
+        context.match.hasSuperOver = true;
+        context.match.superOverStatus = 'PENDING';
+        context.match.superOverTie = false;
+        context.match.superOverWinnerTeamId = undefined;
+        context.match.superOverSetup = undefined;
+        shouldSyncKnockout = false;
+      } else {
+        shouldSyncKnockout = true;
+      }
       matchCompletedNow = true;
     }
+  }
+
+  if (innings.inningsNumber === 3 && innings.status === 'COMPLETED' && context.match.phase === 'SUPER_OVER') {
+    const setup = (context.match.superOverSetup ?? {}) as {
+      battingFirstTeamId?: string;
+      teamA?: { strikerId?: string; nonStrikerId?: string; bowlerId?: string };
+      teamB?: { strikerId?: string; nonStrikerId?: string; bowlerId?: string };
+    };
+    const battingSecondTeamId =
+      innings.battingTeamId.toString() === context.match.teamAId.toString()
+        ? context.match.teamBId?.toString()
+        : context.match.teamAId.toString();
+    if (!battingSecondTeamId || !setup.teamA || !setup.teamB) {
+      throw new AppError('Super over setup is missing.', 409, 'match.super_over_invalid_state');
+    }
+    const battingSecondConfig =
+      battingSecondTeamId === context.match.teamAId.toString() ? setup.teamA : setup.teamB;
+    const bowlingTeamId =
+      battingSecondTeamId === context.match.teamAId.toString()
+        ? context.match.teamBId?.toString()
+        : context.match.teamAId.toString();
+    if (
+      !bowlingTeamId ||
+      !battingSecondConfig.strikerId ||
+      !battingSecondConfig.nonStrikerId ||
+      !battingSecondConfig.bowlerId
+    ) {
+      throw new AppError('Super over setup is missing.', 409, 'match.super_over_invalid_state');
+    }
+
+    const superOverInnings2 = await InningsModel.create({
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      inningsNumber: 4,
+      battingTeamId: battingSecondTeamId,
+      bowlingTeamId,
+      strikerId: battingSecondConfig.strikerId,
+      nonStrikerId: battingSecondConfig.nonStrikerId,
+      currentBowlerId: battingSecondConfig.bowlerId,
+      runs: 0,
+      wickets: 0,
+      balls: 0,
+      ballsPerOver: innings.ballsPerOver,
+      oversPerInnings: 1,
+      eventSeq: 0,
+      lastSeq: 0,
+      currentOver: {
+        overNumber: 0,
+        legalBallsInOver: 0,
+        balls: []
+      },
+      status: 'LIVE'
+    });
+
+    context.match.currentInningsId = superOverInnings2._id;
+    context.match.status = 'LIVE';
+    context.match.superOverStatus = 'LIVE';
+  }
+
+  if (innings.inningsNumber === 4 && innings.status === 'COMPLETED' && context.match.phase === 'SUPER_OVER') {
+    const [superOverInnings1, superOverInnings2] = await Promise.all([
+      scopedFindOne(InningsModel, input.tenantId, { matchId: input.matchId, inningsNumber: 3 }),
+      scopedFindOne(InningsModel, input.tenantId, { matchId: input.matchId, inningsNumber: 4 })
+    ]);
+
+    if (!superOverInnings1 || !superOverInnings2) {
+      throw new AppError('Super over innings not found.', 404, 'innings.not_found');
+    }
+
+    context.match.status = 'COMPLETED';
+    context.match.currentInningsId = undefined;
+    context.match.superOverStatus = 'COMPLETED';
+
+    if (superOverInnings1.runs === superOverInnings2.runs) {
+      context.match.superOverTie = true;
+      context.match.result = {
+        isNoResult: false,
+        ...(context.match.result ?? {}),
+        type: 'TIE'
+      };
+      shouldSyncKnockout = false;
+    } else {
+      const winnerTeamId =
+        superOverInnings1.runs > superOverInnings2.runs
+          ? superOverInnings1.battingTeamId.toString()
+          : superOverInnings2.battingTeamId.toString();
+      context.match.superOverTie = false;
+      context.match.superOverWinnerTeamId = winnerTeamId as any;
+      context.match.result = {
+        isNoResult: false,
+        ...(context.match.result ?? {}),
+        type: 'WIN',
+        winnerTeamId: winnerTeamId as any,
+        winByRuns: undefined,
+        winByWickets: undefined,
+        winByWkts: undefined
+      };
+      shouldSyncKnockout = true;
+    }
+
+    matchCompletedNow = true;
   }
 
   innings.eventSeq += 1;
@@ -1145,11 +1366,13 @@ const applyEvent = async (input: ScoreEventInput) => {
   if (matchCompletedNow) {
     await Promise.all([
       syncLeagueCompletionStatus(input.tenantId, context.match.tournamentId.toString()),
-      syncKnockoutProgression(
-        input.tenantId,
-        context.match.tournamentId.toString(),
-        context.match._id.toString()
-      )
+      shouldSyncKnockout
+        ? syncKnockoutProgression(
+          input.tenantId,
+          context.match.tournamentId.toString(),
+          context.match._id.toString()
+        )
+        : Promise.resolve({ created: 0, stage: null, roundNumber: null })
     ]);
   }
 

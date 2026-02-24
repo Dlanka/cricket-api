@@ -225,6 +225,156 @@ const resolveNextKnockoutStage = (winnerCount: number): KnockoutStage | null => 
   return null;
 };
 
+const buildTournamentOverviewDescription = (
+  tournament: {
+    type: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT';
+    status: 'DRAFT' | 'ACTIVE' | 'COMPLETED';
+    oversPerInnings: number;
+    ballsPerOver?: number;
+    rules?: {
+      points?: { win?: number; tie?: number; noResult?: number; loss?: number };
+      qualificationCount?: number;
+    };
+    stageStatus?: {
+      league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
+      knockout?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
+    };
+  },
+  counts: {
+    total: number;
+    scheduled: number;
+    live: number;
+    completed: number;
+    leagueTotal: number;
+    leagueCompleted: number;
+    knockoutTotal: number;
+    knockoutCompleted: number;
+  }
+) => {
+  const ballsPerOver = tournament.ballsPerOver ?? 6;
+  const points = getPointsRules(tournament);
+  const parts: string[] = [];
+
+  parts.push(
+    `Tournament is ${tournament.type} format and currently ${tournament.status}. Matches are ${tournament.oversPerInnings} overs per innings with ${ballsPerOver} balls per over.`
+  );
+  parts.push(
+    `Progress: ${counts.completed}/${counts.total} completed, ${counts.live} live, ${counts.scheduled} scheduled.`
+  );
+
+  if (tournament.type === 'LEAGUE' || tournament.type === 'LEAGUE_KNOCKOUT') {
+    parts.push(
+      `League stage is ${tournament.stageStatus?.league ?? 'PENDING'} (${counts.leagueCompleted}/${counts.leagueTotal} completed).`
+    );
+    parts.push(
+      `League points: win ${points.win}, tie ${points.tie}, no result ${points.noResult}, loss ${points.loss}.`
+    );
+  }
+
+  if (tournament.type === 'LEAGUE_KNOCKOUT') {
+    parts.push(
+      `Top ${tournament.rules?.qualificationCount ?? 4} teams qualify to knockout. Knockout stage is ${tournament.stageStatus?.knockout ?? 'PENDING'} (${counts.knockoutCompleted}/${counts.knockoutTotal} completed).`
+    );
+  }
+
+  if (tournament.type === 'KNOCKOUT') {
+    parts.push(
+      `Knockout progression: ${counts.knockoutCompleted}/${counts.knockoutTotal} completed in elimination rounds.`
+    );
+  }
+
+  if (tournament.type === 'LEAGUE') {
+    parts.push('Tied league matches remain tied and points are shared by tournament rules.');
+  } else {
+    parts.push(
+      'Tied knockout matches move to Super Over; if still tied after Super Over, manual tie-break winner selection is required.'
+    );
+  }
+
+  return parts.join(' ');
+};
+
+const buildTournamentOverview = (
+  tournament: {
+    type: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT';
+    status: 'DRAFT' | 'ACTIVE' | 'COMPLETED';
+    oversPerInnings: number;
+    ballsPerOver?: number;
+    rules?: {
+      points?: { win?: number; tie?: number; noResult?: number; loss?: number };
+      qualificationCount?: number;
+    };
+    stageStatus?: {
+      league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
+      knockout?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
+    };
+  },
+  counts: {
+    total: number;
+    scheduled: number;
+    live: number;
+    completed: number;
+    leagueTotal: number;
+    leagueCompleted: number;
+    knockoutTotal: number;
+    knockoutCompleted: number;
+  }
+) => {
+  const ballsPerOver = tournament.ballsPerOver ?? 6;
+  const points = getPointsRules(tournament);
+
+  return {
+    type: tournament.type,
+    status: tournament.status,
+    settings: {
+      oversPerInnings: tournament.oversPerInnings,
+      ballsPerOver
+    },
+    progress: {
+      totalMatches: counts.total,
+      completedMatches: counts.completed,
+      liveMatches: counts.live,
+      scheduledMatches: counts.scheduled
+    },
+    stages: {
+      league: {
+        status:
+          tournament.type === 'KNOCKOUT'
+            ? 'PENDING'
+            : (tournament.stageStatus?.league ?? 'PENDING'),
+        totalMatches: counts.leagueTotal,
+        completedMatches: counts.leagueCompleted
+      },
+      knockout: {
+        status:
+          tournament.type === 'LEAGUE'
+            ? 'PENDING'
+            : (tournament.stageStatus?.knockout ?? 'PENDING'),
+        totalMatches: counts.knockoutTotal,
+        completedMatches: counts.knockoutCompleted,
+        qualificationCount: tournament.type === 'LEAGUE_KNOCKOUT'
+          ? (tournament.rules?.qualificationCount ?? 4)
+          : null
+      }
+    },
+    rules: {
+      points:
+        tournament.type === 'LEAGUE' || tournament.type === 'LEAGUE_KNOCKOUT'
+          ? {
+              win: points.win,
+              tie: points.tie,
+              noResult: points.noResult,
+              loss: points.loss
+            }
+          : null
+    },
+    tiePolicy:
+      tournament.type === 'LEAGUE'
+        ? 'LEAGUE_TIE_SHARED'
+        : 'KNOCKOUT_SUPER_OVER_THEN_TIE_BREAK'
+  };
+};
+
 const toPlayerName = (fullName: string | undefined, fallback: string) => fullName?.trim() || fallback;
 
 const getLeagueStandingsRows = async (tenantId: string, tournamentId: string) => {
@@ -915,6 +1065,218 @@ export const getTournamentStats = async (tenantId: string, id: string) => {
   };
 };
 
+export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(id, 'Invalid tournament id.');
+
+  const tournament = await scopedFindOne(TournamentModel, tenantId, { _id: id });
+  if (!tournament) {
+    throw new AppError('Tournament not found.', 404, 'tournament.not_found');
+  }
+
+  const matches = await scopedFind(MatchModel, tenantId, { tournamentId: id }).select({ _id: 1 });
+  const matchIds = matches.map((entry) => entry._id);
+
+  if (matchIds.length === 0) {
+    return { tournamentId: tournament._id.toString(), winner: null, leaderboard: [] };
+  }
+
+  const innings = await scopedFind(InningsModel, tenantId, { matchId: { $in: matchIds } }).select({
+    _id: 1,
+    matchId: 1,
+    ballsPerOver: 1
+  });
+  const inningsIds = innings.map((entry) => entry._id);
+  const inningsBallsPerOver = new Map<string, number>(
+    innings.map((entry) => [entry._id.toString(), entry.ballsPerOver ?? tournament.ballsPerOver ?? 6])
+  );
+  const inningsMatchId = new Map<string, string>(
+    innings.map((entry) => [entry._id.toString(), entry.matchId.toString()])
+  );
+
+  if (inningsIds.length === 0) {
+    return { tournamentId: tournament._id.toString(), winner: null, leaderboard: [] };
+  }
+
+  const [batterRows, bowlerRows] = await Promise.all([
+    scopedFind(InningsBatterModel, tenantId, { inningsId: { $in: inningsIds } }).select({
+      inningsId: 1,
+      playerRef: 1,
+      batterKey: 1,
+      runs: 1,
+      balls: 1,
+      fours: 1,
+      sixes: 1,
+      isOut: 1
+    }),
+    scopedFind(InningsBowlerModel, tenantId, { inningsId: { $in: inningsIds } }).select({
+      inningsId: 1,
+      playerId: 1,
+      name: 1,
+      runsConceded: 1,
+      balls: 1,
+      wickets: 1
+    })
+  ]);
+
+  const playerIds = new Set<string>();
+  batterRows.forEach((entry) => {
+    const playerId = entry.playerRef?.playerId?.toString() ?? entry.batterKey?.playerId?.toString();
+    if (playerId) playerIds.add(playerId);
+  });
+  bowlerRows.forEach((entry) => playerIds.add(entry.playerId.toString()));
+
+  const players = playerIds.size
+    ? await PlayerModel.find({ tenantId, _id: { $in: [...playerIds] } }).select({
+        _id: 1,
+        fullName: 1,
+        teamId: 1
+      })
+    : [];
+  const teamIds = [...new Set(players.map((entry) => entry.teamId.toString()))];
+  const teams = teamIds.length
+    ? await TeamModel.find({ tenantId, _id: { $in: teamIds } }).select({ _id: 1, name: 1, shortName: 1 })
+    : [];
+
+  const playerMap = new Map(
+    players.map((entry) => [
+      entry._id.toString(),
+      { fullName: entry.fullName, teamId: entry.teamId.toString() }
+    ])
+  );
+  const teamMap = new Map(
+    teams.map((entry) => [
+      entry._id.toString(),
+      { id: entry._id.toString(), name: entry.name, shortName: entry.shortName ?? null }
+    ])
+  );
+
+  type PlayerAwardAgg = {
+    playerId: string | null;
+    name: string;
+    teamId: string | null;
+    matches: Set<string>;
+    runs: number;
+    balls: number;
+    fours: number;
+    sixes: number;
+    wickets: number;
+    ballsBowled: number;
+    runsConceded: number;
+    fifties: number;
+    hundreds: number;
+    fiveWicketHauls: number;
+  };
+
+  const aggMap = new Map<string, PlayerAwardAgg>();
+  const ensureAgg = (playerId: string | null, fallbackName: string) => {
+    const key = playerId ? `pid:${playerId}` : `name:${fallbackName.toLowerCase()}`;
+    const existing = aggMap.get(key);
+    if (existing) return existing;
+    const player = playerId ? playerMap.get(playerId) : undefined;
+    const created: PlayerAwardAgg = {
+      playerId,
+      name: player?.fullName ?? fallbackName,
+      teamId: player?.teamId ?? null,
+      matches: new Set<string>(),
+      runs: 0,
+      balls: 0,
+      fours: 0,
+      sixes: 0,
+      wickets: 0,
+      ballsBowled: 0,
+      runsConceded: 0,
+      fifties: 0,
+      hundreds: 0,
+      fiveWicketHauls: 0
+    };
+    aggMap.set(key, created);
+    return created;
+  };
+
+  batterRows.forEach((entry) => {
+    const playerId = entry.playerRef?.playerId?.toString() ?? entry.batterKey?.playerId?.toString() ?? null;
+    const name = entry.playerRef?.name ?? entry.batterKey?.name ?? 'Unknown Player';
+    const agg = ensureAgg(playerId, name);
+    const matchId = inningsMatchId.get(entry.inningsId.toString());
+    if (matchId) agg.matches.add(matchId);
+    agg.runs += entry.runs;
+    agg.balls += entry.balls;
+    agg.fours += entry.fours;
+    agg.sixes += entry.sixes;
+    if (entry.runs >= 100) agg.hundreds += 1;
+    else if (entry.runs >= 50) agg.fifties += 1;
+  });
+
+  bowlerRows.forEach((entry) => {
+    const playerId = entry.playerId.toString();
+    const agg = ensureAgg(playerId, entry.name || 'Unknown Player');
+    const matchId = inningsMatchId.get(entry.inningsId.toString());
+    if (matchId) agg.matches.add(matchId);
+    agg.wickets += entry.wickets;
+    agg.ballsBowled += entry.balls;
+    agg.runsConceded += entry.runsConceded;
+    if (entry.wickets >= 5) agg.fiveWicketHauls += 1;
+  });
+
+  const leaderboard = [...aggMap.values()]
+    .map((entry) => {
+      const ballsPerOver = tournament.ballsPerOver ?? 6;
+      const oversBowled = entry.ballsBowled / ballsPerOver;
+      const economy = oversBowled > 0 ? entry.runsConceded / oversBowled : 0;
+      const strikeRate = entry.balls > 0 ? (entry.runs / entry.balls) * 100 : 0;
+      const economyBonus = oversBowled >= 2 ? (economy < 6 ? 10 : economy < 7 ? 5 : 0) : 0;
+      const points =
+        entry.runs +
+        entry.wickets * 25 +
+        entry.fours * 2 +
+        entry.sixes * 3 +
+        entry.fifties * 8 +
+        entry.hundreds * 16 +
+        entry.fiveWicketHauls * 20 +
+        economyBonus;
+
+      return {
+        playerId: entry.playerId,
+        name: entry.name,
+        team: entry.teamId ? teamMap.get(entry.teamId) ?? null : null,
+        matches: entry.matches.size,
+        runs: entry.runs,
+        wickets: entry.wickets,
+        fours: entry.fours,
+        sixes: entry.sixes,
+        fifties: entry.fifties,
+        hundreds: entry.hundreds,
+        fiveWicketHauls: entry.fiveWicketHauls,
+        strikeRate: Number(strikeRate.toFixed(2)),
+        economy: Number(economy.toFixed(2)),
+        points: Number(points.toFixed(2))
+      };
+    })
+    .sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      if (b.wickets !== a.wickets) return b.wickets - a.wickets;
+      if (b.runs !== a.runs) return b.runs - a.runs;
+      return a.name.localeCompare(b.name);
+    })
+    .map((entry, index) => ({ rank: index + 1, ...entry }));
+
+  return {
+    tournamentId: tournament._id.toString(),
+    winner: leaderboard[0] ?? null,
+    leaderboard: leaderboard.slice(0, 10),
+    scoring: {
+      run: 1,
+      wicket: 25,
+      four: 2,
+      six: 3,
+      fiftyBonus: 8,
+      hundredBonus: 16,
+      fiveWicketBonus: 20
+    }
+  };
+};
+
 export const getTournamentStandings = async (tenantId: string, id: string) => {
   ensureObjectId(tenantId, 'Invalid tenant id.');
   ensureObjectId(id, 'Invalid tournament id.');
@@ -1116,7 +1478,49 @@ export const getTournamentById = async (tenantId: string, id: string) => {
     throw new AppError('Tournament not found.', 404, 'tournament.not_found');
   }
 
-  return tournament;
+  const [total, scheduled, live, completed, leagueTotal, leagueCompleted, knockoutTotal, knockoutCompleted] =
+    await Promise.all([
+      MatchModel.countDocuments({ tenantId, tournamentId: id }),
+      MatchModel.countDocuments({ tenantId, tournamentId: id, status: 'SCHEDULED' }),
+      MatchModel.countDocuments({ tenantId, tournamentId: id, status: 'LIVE' }),
+      MatchModel.countDocuments({ tenantId, tournamentId: id, status: 'COMPLETED' }),
+      MatchModel.countDocuments({ tenantId, tournamentId: id, stage: 'LEAGUE' }),
+      MatchModel.countDocuments({ tenantId, tournamentId: id, stage: 'LEAGUE', status: 'COMPLETED' }),
+      MatchModel.countDocuments({ tenantId, tournamentId: id, stage: { $in: ['R1', 'QF', 'SF', 'FINAL'] } }),
+      MatchModel.countDocuments({
+        tenantId,
+        tournamentId: id,
+        stage: { $in: ['R1', 'QF', 'SF', 'FINAL'] },
+        status: 'COMPLETED'
+      })
+    ]);
+
+  const overviewDescription = buildTournamentOverviewDescription(tournament, {
+    total,
+    scheduled,
+    live,
+    completed,
+    leagueTotal,
+    leagueCompleted,
+    knockoutTotal,
+    knockoutCompleted
+  });
+  const overview = buildTournamentOverview(tournament, {
+    total,
+    scheduled,
+    live,
+    completed,
+    leagueTotal,
+    leagueCompleted,
+    knockoutTotal,
+    knockoutCompleted
+  });
+
+  return {
+    ...tournament.toObject(),
+    overviewDescription,
+    overview
+  };
 };
 
 export const updateTournament = async (
@@ -1134,6 +1538,19 @@ export const updateTournament = async (
   }
 
   const hasFixtures = await scopedFindOne(MatchModel, tenantId, { tournamentId: id });
+  const startedMatch = await scopedFindOne(MatchModel, tenantId, {
+    tournamentId: id,
+    $or: [{ status: 'LIVE' }, { status: 'COMPLETED', teamBId: { $ne: null } }]
+  });
+
+  if (startedMatch && updates.type !== undefined && updates.type !== tournament.type) {
+    throw new AppError(
+      'Tournament type cannot be changed after a match has started.',
+      409,
+      'tournament.type_locked'
+    );
+  }
+
   const wantsConfigChange =
     updates.type !== undefined ||
     updates.oversPerInnings !== undefined ||
@@ -1141,11 +1558,34 @@ export const updateTournament = async (
     updates.rules !== undefined;
 
   if (hasFixtures && wantsConfigChange) {
-    throw new AppError(
-      'Tournament format and over configuration are locked after fixtures are generated.',
-      409,
-      'tournament.config_locked'
-    );
+    if (startedMatch) {
+      throw new AppError(
+        'Tournament format and over configuration are locked after a match has started.',
+        409,
+        'tournament.config_locked'
+      );
+    }
+
+    // Regenerate flow support: allow config updates while fixtures are still scheduled
+    // and no score artifacts exist yet.
+    const matchIds = (
+      await scopedFind(MatchModel, tenantId, { tournamentId: id }).select({ _id: 1 })
+    ).map((entry) => entry._id);
+
+    if (matchIds.length > 0) {
+      const [inningsExists, scoreEventExists] = await Promise.all([
+        InningsModel.exists({ tenantId, matchId: { $in: matchIds } }),
+        ScoreEventModel.exists({ tenantId, matchId: { $in: matchIds } })
+      ]);
+
+      if (inningsExists || scoreEventExists) {
+        throw new AppError(
+          'Tournament format and over configuration are locked after score data exists.',
+          409,
+          'tournament.config_locked'
+        );
+      }
+    }
   }
 
   const nextType = updates.type ?? tournament.type;

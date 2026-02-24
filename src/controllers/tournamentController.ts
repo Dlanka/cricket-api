@@ -7,6 +7,7 @@ import {
   deleteTournament,
   generateKnockoutFromLeague,
   getTournamentById,
+  getTournamentPlayerOfSeries,
   getTournamentStats,
   getTournamentStandings,
   listTournaments,
@@ -159,6 +160,21 @@ export const getTournamentStatsHandler = async (
     const { id } = idSchema.parse(req.params);
     const tenantId = getTenantId(req);
     const result = await getTournamentStats(tenantId, id);
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getTournamentPlayerOfSeriesHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { id } = idSchema.parse(req.params);
+    const tenantId = getTenantId(req);
+    const result = await getTournamentPlayerOfSeries(tenantId, id);
     return res.status(200).json(ok(result));
   } catch (error) {
     return next(error);
