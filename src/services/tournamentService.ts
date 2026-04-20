@@ -606,6 +606,9 @@ export const getTournamentStats = async (tenantId: string, id: string) => {
   const inningsMatchId = new Map<string, string>(
     innings.map((entry) => [entry._id.toString(), entry.matchId.toString()])
   );
+  const inningsBallsPerOver = new Map<string, number>(
+    innings.map((entry) => [entry._id.toString(), entry.ballsPerOver ?? tournament.ballsPerOver ?? 6])
+  );
 
   if (inningsIds.length === 0) {
     return {
