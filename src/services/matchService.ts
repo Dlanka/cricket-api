@@ -1698,59 +1698,91 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
   const teamARuns = resolveSuperOverRuns(match.teamAId.toString());
   const teamBRuns = resolveSuperOverRuns(match.teamBId?.toString() ?? null);
 
-  const scoredEvents = await ScoreEventModel.find({
-    tenantId,
-    matchId,
-    inningsId: innings._id,
-    type: { $in: ['extra', 'wicket'] },
-    $and: [
-      { $or: [{ isUndone: false }, { isUndone: { $exists: false } }] },
-      { $or: [{ undoneAt: null }, { undoneAt: { $exists: false } }] }
-    ]
-  }).select({ payload: 1, type: 1 });
+  let wides =
+    typeof (innings as { wides?: unknown }).wides === 'number'
+      ? ((innings as { wides: number }).wides ?? 0)
+      : null;
+  let noBalls =
+    typeof (innings as { noBalls?: unknown }).noBalls === 'number'
+      ? ((innings as { noBalls: number }).noBalls ?? 0)
+      : null;
+  let byes =
+    typeof (innings as { byes?: unknown }).byes === 'number'
+      ? ((innings as { byes: number }).byes ?? 0)
+      : null;
+  let legByes =
+    typeof (innings as { legByes?: unknown }).legByes === 'number'
+      ? ((innings as { legByes: number }).legByes ?? 0)
+      : null;
+  let extras =
+    typeof (innings as { extras?: unknown }).extras === 'number'
+      ? ((innings as { extras: number }).extras ?? 0)
+      : null;
 
-  let wides = 0;
-  let noBalls = 0;
-  let byes = 0;
-  let legByes = 0;
+  // Backward compatibility for old innings documents that were created before extras counters.
+  if (wides === null || noBalls === null || byes === null || legByes === null || extras === null) {
+    const scoredEvents = await ScoreEventModel.find({
+      tenantId,
+      matchId,
+      inningsId: innings._id,
+      type: { $in: ['extra', 'wicket'] },
+      isUndone: false
+    }).select({ payload: 1, type: 1 });
 
-  scoredEvents.forEach((event) => {
-    const payload = event.payload as
-      | { extraType?: string; additionalRuns?: unknown; runsWithWicket?: unknown }
-      | undefined;
-    const eventType = event.type;
+    let calculatedWides = 0;
+    let calculatedNoBalls = 0;
+    let calculatedByes = 0;
+    let calculatedLegByes = 0;
 
-    if (eventType === 'extra') {
-      const extraType = payload?.extraType;
-      const additionalRunsRaw = payload?.additionalRuns;
-      const additionalRuns = typeof additionalRunsRaw === 'number' ? additionalRunsRaw : 0;
+    scoredEvents.forEach((event) => {
+      const payload = event.payload as
+        | { extraType?: string; additionalRuns?: unknown; runsWithWicket?: unknown }
+        | undefined;
+      const eventType = event.type;
 
-      if (extraType === 'wide') {
-        wides += 1 + additionalRuns;
-      } else if (extraType === 'noBall') {
-        noBalls += 1;
-      } else if (extraType === 'byes') {
-        byes += additionalRuns;
-      } else if (extraType === 'legByes') {
-        legByes += additionalRuns;
+      if (eventType === 'extra') {
+        const extraType = payload?.extraType;
+        const additionalRunsRaw = payload?.additionalRuns;
+        const additionalRuns = typeof additionalRunsRaw === 'number' ? additionalRunsRaw : 0;
+
+        if (extraType === 'wide') {
+          calculatedWides += 1 + additionalRuns;
+        } else if (extraType === 'noBall') {
+          calculatedNoBalls += 1;
+        } else if (extraType === 'byes') {
+          calculatedByes += additionalRuns;
+        } else if (extraType === 'legByes') {
+          calculatedLegByes += additionalRuns;
+        }
+        return;
       }
-      return;
-    }
 
-    if (eventType === 'wicket') {
-      const extraType = payload?.extraType;
-      const runsWithWicketRaw = payload?.runsWithWicket;
-      const runsWithWicket = typeof runsWithWicketRaw === 'number' ? runsWithWicketRaw : 0;
+      if (eventType === 'wicket') {
+        const extraType = payload?.extraType;
+        const runsWithWicketRaw = payload?.runsWithWicket;
+        const runsWithWicket = typeof runsWithWicketRaw === 'number' ? runsWithWicketRaw : 0;
 
-      if (extraType === 'wide') {
-        wides += 1 + runsWithWicket;
-      } else if (extraType === 'noBall') {
-        noBalls += 1 + runsWithWicket;
+        if (extraType === 'wide') {
+          calculatedWides += 1 + runsWithWicket;
+        } else if (extraType === 'noBall') {
+          calculatedNoBalls += 1 + runsWithWicket;
+        }
       }
-    }
-  });
+    });
 
-  const extras = wides + noBalls + byes + legByes;
+    wides = calculatedWides;
+    noBalls = calculatedNoBalls;
+    byes = calculatedByes;
+    legByes = calculatedLegByes;
+    extras = calculatedWides + calculatedNoBalls + calculatedByes + calculatedLegByes;
+
+    (innings as { wides?: number }).wides = wides;
+    (innings as { noBalls?: number }).noBalls = noBalls;
+    (innings as { byes?: number }).byes = byes;
+    (innings as { legByes?: number }).legByes = legByes;
+    (innings as { extras?: number }).extras = extras;
+    await innings.save();
+  }
 
   return {
     matchId: match._id.toString(),
@@ -1771,11 +1803,11 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
       wickets: innings.wickets,
       balls: innings.balls,
       overs: formatOvers(innings.balls, ballsPerOver),
-      extras,
-      wides,
-      noBalls,
-      byes,
-      legByes
+      extras: extras ?? 0,
+      wides: wides ?? 0,
+      noBalls: noBalls ?? 0,
+      byes: byes ?? 0,
+      legByes: legByes ?? 0
     },
     current: {
       strikerId: strikerBatterId,

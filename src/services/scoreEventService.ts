@@ -44,6 +44,11 @@ type Snapshot = {
     runs: number;
     wickets: number;
     balls: number;
+    extras: number;
+    wides: number;
+    noBalls: number;
+    byes: number;
+    legByes: number;
     status: 'LIVE' | 'COMPLETED';
     strikerId: string;
     nonStrikerId: string;
@@ -105,6 +110,14 @@ const ensureCurrentOver = (innings: any) => {
   if (!Array.isArray(innings.currentOver.balls)) {
     innings.currentOver.balls = [];
   }
+};
+
+const ensureInningsExtras = (innings: any) => {
+  innings.extras = Number.isFinite(Number(innings.extras)) ? Number(innings.extras) : 0;
+  innings.wides = Number.isFinite(Number(innings.wides)) ? Number(innings.wides) : 0;
+  innings.noBalls = Number.isFinite(Number(innings.noBalls)) ? Number(innings.noBalls) : 0;
+  innings.byes = Number.isFinite(Number(innings.byes)) ? Number(innings.byes) : 0;
+  innings.legByes = Number.isFinite(Number(innings.legByes)) ? Number(innings.legByes) : 0;
 };
 
 const getMaxLegalBalls = (innings: any, ballsPerOver: number) =>
@@ -347,6 +360,11 @@ const captureSnapshot = async (
       runs: innings.runs,
       wickets: innings.wickets,
       balls: innings.balls,
+      extras: innings.extras ?? 0,
+      wides: innings.wides ?? 0,
+      noBalls: innings.noBalls ?? 0,
+      byes: innings.byes ?? 0,
+      legByes: innings.legByes ?? 0,
       status: innings.status,
       strikerId: innings.strikerId.toString(),
       nonStrikerId: innings.nonStrikerId.toString(),
@@ -370,6 +388,11 @@ const restoreSnapshot = async (tenantId: string, innings: any, snapshot: Snapsho
   innings.runs = snapshot.innings.runs;
   innings.wickets = snapshot.innings.wickets;
   innings.balls = snapshot.innings.balls;
+  innings.extras = snapshot.innings.extras ?? 0;
+  innings.wides = snapshot.innings.wides ?? 0;
+  innings.noBalls = snapshot.innings.noBalls ?? 0;
+  innings.byes = snapshot.innings.byes ?? 0;
+  innings.legByes = snapshot.innings.legByes ?? 0;
   innings.status = snapshot.innings.status;
   innings.strikerId = snapshot.innings.strikerId;
   innings.nonStrikerId = snapshot.innings.nonStrikerId;
@@ -526,75 +549,15 @@ const buildEventMeta = (input: ScoreEventInput) => {
   return { isLegal: false, summaryDisplay: 'Undo' };
 };
 
-const calculateExtrasBreakdown = async (tenantId: string, matchId: string, inningsId: string) => {
-  const scoredEvents = await ScoreEventModel.find({
-    tenantId,
-    matchId,
-    inningsId,
-    type: { $in: ['extra', 'wicket'] },
-    $and: [
-      { $or: [{ isUndone: false }, { isUndone: { $exists: false } }] },
-      { $or: [{ undoneAt: null }, { undoneAt: { $exists: false } }] }
-    ]
-  }).select({ payload: 1, type: 1 });
-
-  let wides = 0;
-  let noBalls = 0;
-  let byes = 0;
-  let legByes = 0;
-
-  scoredEvents.forEach((event: { payload?: { extraType?: string; additionalRuns?: unknown; runsWithWicket?: unknown }; type?: string }) => {
-    const payload = event.payload as
-      | { extraType?: string; additionalRuns?: unknown; runsWithWicket?: unknown }
-      | undefined;
-    const eventType = event.type;
-
-    if (eventType === 'extra') {
-      const additionalRunsRaw = payload?.additionalRuns;
-      const additionalRuns = typeof additionalRunsRaw === 'number' ? additionalRunsRaw : 0;
-
-      if (payload?.extraType === 'wide') {
-        wides += 1 + additionalRuns;
-      } else if (payload?.extraType === 'noBall') {
-        noBalls += 1;
-      } else if (payload?.extraType === 'byes') {
-        byes += additionalRuns;
-      } else if (payload?.extraType === 'legByes') {
-        legByes += additionalRuns;
-      }
-      return;
-    }
-
-    if (eventType === 'wicket') {
-      const runsWithWicketRaw = payload?.runsWithWicket;
-      const runsWithWicket = typeof runsWithWicketRaw === 'number' ? runsWithWicketRaw : 0;
-
-      if (payload?.extraType === 'wide') {
-        wides += 1 + runsWithWicket;
-      } else if (payload?.extraType === 'noBall') {
-        noBalls += 1 + runsWithWicket;
-      }
-    }
-  });
-
-  return {
-    extras: wides + noBalls + byes + legByes,
-    wides,
-    noBalls,
-    byes,
-    legByes
-  };
-};
-
 const getScoreboard = async (context: any) => {
   const inningsId = context.innings._id.toString();
   const tenantId = context.innings.tenantId.toString();
   const matchId = context.match._id.toString();
+  ensureInningsExtras(context.innings);
 
-  const [batters, bowlers, extrasBreakdown] = await Promise.all([
+  const [batters, bowlers] = await Promise.all([
     scopedFind(InningsBatterModel, tenantId, { inningsId }).sort({ createdAt: 1 }),
-    scopedFind(InningsBowlerModel, tenantId, { inningsId }).sort({ createdAt: 1 }),
-    calculateExtrasBreakdown(tenantId, matchId, inningsId)
+    scopedFind(InningsBowlerModel, tenantId, { inningsId }).sort({ createdAt: 1 })
   ]);
 
   ensureCurrentOver(context.innings);
@@ -622,11 +585,11 @@ const getScoreboard = async (context: any) => {
       wickets: context.innings.wickets,
       balls: context.innings.balls,
       overs: formatOvers(context.innings.balls, context.ballsPerOver),
-      extras: extrasBreakdown.extras,
-      wides: extrasBreakdown.wides,
-      noBalls: extrasBreakdown.noBalls,
-      byes: extrasBreakdown.byes,
-      legByes: extrasBreakdown.legByes
+      extras: context.innings.extras ?? 0,
+      wides: context.innings.wides ?? 0,
+      noBalls: context.innings.noBalls ?? 0,
+      byes: context.innings.byes ?? 0,
+      legByes: context.innings.legByes ?? 0
     },
     inningsCompleted: context.innings.status === 'COMPLETED',
     current: {
@@ -955,6 +918,7 @@ const applyEvent = async (input: ScoreEventInput) => {
   const context = await ensureLiveContext(input.tenantId, input.matchId);
 
   const innings = context.innings;
+  ensureInningsExtras(innings);
   const striker = await resolveBatter(input.tenantId, innings._id.toString(), innings.strikerId.toString());
   const nonStriker = await resolveBatter(
     input.tenantId,
@@ -1038,8 +1002,8 @@ const applyEvent = async (input: ScoreEventInput) => {
       overEnded,
       inningsCompleted: innings.status === 'COMPLETED'
     });
-    innings.strikerId = nextPair.strikerId;
-    innings.nonStrikerId = nextPair.nonStrikerId;
+    innings.strikerId = nextPair.strikerId as any;
+    innings.nonStrikerId = nextPair.nonStrikerId as any;
   }
 
   if (input.type === 'extra') {
@@ -1092,6 +1056,19 @@ const applyEvent = async (input: ScoreEventInput) => {
       if (additionalRuns === 4) striker.fours += 1;
       if (additionalRuns === 6) striker.sixes += 1;
     }
+    if (extraType === 'wide') {
+      innings.wides += totalRuns;
+      innings.extras += totalRuns;
+    } else if (extraType === 'noBall') {
+      innings.noBalls += 1;
+      innings.extras += 1;
+    } else if (extraType === 'byes') {
+      innings.byes += additionalRuns;
+      innings.extras += additionalRuns;
+    } else if (extraType === 'legByes') {
+      innings.legByes += additionalRuns;
+      innings.extras += additionalRuns;
+    }
 
     const rotationRuns =
       extraType === 'wide' || extraType === 'noBall' ? additionalRuns : totalRuns;
@@ -1106,8 +1083,8 @@ const applyEvent = async (input: ScoreEventInput) => {
       overEnded,
       inningsCompleted: innings.status === 'COMPLETED'
     });
-    innings.strikerId = nextPair.strikerId;
-    innings.nonStrikerId = nextPair.nonStrikerId;
+    innings.strikerId = nextPair.strikerId as any;
+    innings.nonStrikerId = nextPair.nonStrikerId as any;
   }
 
   if (input.type === 'wicket') {
@@ -1147,6 +1124,7 @@ const applyEvent = async (input: ScoreEventInput) => {
     }
 
     innings.runs += totalRuns;
+    innings.extras += penaltyRuns + (wicketExtraType === 'wide' || wicketExtraType === 'noBall' ? runs : 0);
     innings.wickets = nextWickets;
     if (!isIllegalWicketDelivery) {
       innings.balls += 1;
@@ -1174,7 +1152,7 @@ const applyEvent = async (input: ScoreEventInput) => {
     fallen.outBowlerName = bowler.name ?? '';
     if (requiresFielder && fielderId) {
       const fielderPlayer = await PlayerModel.findById(fielderId).select({ fullName: 1 });
-      fallen.outFielderId = fielderId;
+      fallen.outFielderId = fielderId as any;
       fallen.outFielderName = fielderPlayer?.fullName ?? '';
     } else {
       fallen.outFielderId = undefined;
@@ -1189,9 +1167,11 @@ const applyEvent = async (input: ScoreEventInput) => {
     }
     if (wicketExtraType === 'wide') {
       bowler.wides += 1;
+      innings.wides += 1 + runs;
     }
     if (wicketExtraType === 'noBall') {
       bowler.noBalls += 1;
+      innings.noBalls += 1 + runs;
     }
     if (shouldCreditBowlerWicket(wicketType)) {
       bowler.wickets += 1;

@@ -71,6 +71,7 @@ scoreEventSchema.index({ tenantId: 1, inningsId: 1, seq: 1 }, { unique: true });
 scoreEventSchema.index({ tenantId: 1, matchId: 1, inningsId: 1, createdAt: -1 });
 scoreEventSchema.index({ tenantId: 1, inningsId: 1, seq: -1 });
 scoreEventSchema.index({ tenantId: 1, inningsId: 1, undoneAt: 1 });
+scoreEventSchema.index({ tenantId: 1, matchId: 1, inningsId: 1, isUndone: 1, type: 1, seq: -1 });
 
 export type ScoreEvent = InferSchemaType<typeof scoreEventSchema>;
 

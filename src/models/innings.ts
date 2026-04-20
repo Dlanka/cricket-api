@@ -54,6 +54,26 @@ const inningsSchema = new Schema(
       type: Number,
       default: 0
     },
+    extras: {
+      type: Number,
+      default: 0
+    },
+    wides: {
+      type: Number,
+      default: 0
+    },
+    noBalls: {
+      type: Number,
+      default: 0
+    },
+    byes: {
+      type: Number,
+      default: 0
+    },
+    legByes: {
+      type: Number,
+      default: 0
+    },
     ballsPerOver: {
       type: Number,
       default: 6
