@@ -603,9 +603,6 @@ export const getTournamentStats = async (tenantId: string, id: string) => {
     ballsPerOver: 1
   });
   const inningsIds = innings.map((entry) => entry._id);
-  const inningsBallsPerOver = new Map<string, number>(
-    innings.map((entry) => [entry._id.toString(), entry.ballsPerOver ?? tournament.ballsPerOver ?? 6])
-  );
   const inningsMatchId = new Map<string, string>(
     innings.map((entry) => [entry._id.toString(), entry.matchId.toString()])
   );
@@ -1087,9 +1084,6 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
     ballsPerOver: 1
   });
   const inningsIds = innings.map((entry) => entry._id);
-  const inningsBallsPerOver = new Map<string, number>(
-    innings.map((entry) => [entry._id.toString(), entry.ballsPerOver ?? tournament.ballsPerOver ?? 6])
-  );
   const inningsMatchId = new Map<string, string>(
     innings.map((entry) => [entry._id.toString(), entry.matchId.toString()])
   );
@@ -1107,7 +1101,9 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
       balls: 1,
       fours: 1,
       sixes: 1,
-      isOut: 1
+      isOut: 1,
+      outKind: 1,
+      outFielderId: 1
     }),
     scopedFind(InningsBowlerModel, tenantId, { inningsId: { $in: inningsIds } }).select({
       inningsId: 1,
@@ -1123,6 +1119,8 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
   batterRows.forEach((entry) => {
     const playerId = entry.playerRef?.playerId?.toString() ?? entry.batterKey?.playerId?.toString();
     if (playerId) playerIds.add(playerId);
+    const outFielderId = entry.outFielderId?.toString();
+    if (outFielderId) playerIds.add(outFielderId);
   });
   bowlerRows.forEach((entry) => playerIds.add(entry.playerId.toString()));
 
@@ -1166,6 +1164,8 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
     fifties: number;
     hundreds: number;
     fiveWicketHauls: number;
+    catches: number;
+    runOuts: number;
   };
 
   const aggMap = new Map<string, PlayerAwardAgg>();
@@ -1189,6 +1189,9 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
       fifties: 0,
       hundreds: 0,
       fiveWicketHauls: 0
+      ,
+      catches: 0,
+      runOuts: 0
     };
     aggMap.set(key, created);
     return created;
@@ -1206,6 +1209,19 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
     agg.sixes += entry.sixes;
     if (entry.runs >= 100) agg.hundreds += 1;
     else if (entry.runs >= 50) agg.fifties += 1;
+
+    const fielderId = entry.outFielderId?.toString() ?? null;
+    if (fielderId) {
+      const fielderAgg = ensureAgg(fielderId, 'Unknown Player');
+      const fielderMatchId = inningsMatchId.get(entry.inningsId.toString());
+      if (fielderMatchId) fielderAgg.matches.add(fielderMatchId);
+
+      if (entry.outKind === 'caught') {
+        fielderAgg.catches += 1;
+      } else if (entry.outKind === 'runOut') {
+        fielderAgg.runOuts += 1;
+      }
+    }
   });
 
   bowlerRows.forEach((entry) => {
@@ -1226,6 +1242,7 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
       const economy = oversBowled > 0 ? entry.runsConceded / oversBowled : 0;
       const strikeRate = entry.balls > 0 ? (entry.runs / entry.balls) * 100 : 0;
       const economyBonus = oversBowled >= 2 ? (economy < 6 ? 10 : economy < 7 ? 5 : 0) : 0;
+      const fieldingPoints = entry.catches * 8 + entry.runOuts * 10;
       const points =
         entry.runs +
         entry.wickets * 25 +
@@ -1234,6 +1251,7 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
         entry.fifties * 8 +
         entry.hundreds * 16 +
         entry.fiveWicketHauls * 20 +
+        fieldingPoints +
         economyBonus;
 
       return {
@@ -1248,6 +1266,8 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
         fifties: entry.fifties,
         hundreds: entry.hundreds,
         fiveWicketHauls: entry.fiveWicketHauls,
+        catches: entry.catches,
+        runOuts: entry.runOuts,
         strikeRate: Number(strikeRate.toFixed(2)),
         economy: Number(economy.toFixed(2)),
         points: Number(points.toFixed(2))
@@ -1272,7 +1292,9 @@ export const getTournamentPlayerOfSeries = async (tenantId: string, id: string) 
       six: 3,
       fiftyBonus: 8,
       hundredBonus: 16,
-      fiveWicketBonus: 20
+      fiveWicketBonus: 20,
+      catch: 8,
+      runOut: 10
     }
   };
 };

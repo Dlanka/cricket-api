@@ -85,6 +85,41 @@ const formatOvers = (balls: number, ballsPerOver: number) => {
   return `${completedOvers}.${ballsInOver}`;
 };
 
+const isLegalDeliveryEvent = (event: { type: string; isLegal?: boolean; payload?: Record<string, unknown> }) => {
+  if (typeof event.isLegal === 'boolean') {
+    return event.isLegal;
+  }
+
+  if (event.type === 'run' || event.type === 'wicket') {
+    return true;
+  }
+
+  if (event.type !== 'extra') {
+    return false;
+  }
+
+  const extraType = event.payload?.extraType as string | undefined;
+  return extraType === 'byes' || extraType === 'legByes';
+};
+
+const getCompletedRunsForDelivery = (event: { type: string; payload?: Record<string, unknown> }) => {
+  const payload = event.payload ?? {};
+
+  if (event.type === 'run') {
+    return Number(payload.runs ?? 0);
+  }
+
+  if (event.type === 'extra') {
+    return Number(payload.additionalRuns ?? 0);
+  }
+
+  if (event.type === 'wicket') {
+    return Number(payload.runsWithWicket ?? 0);
+  }
+
+  return 0;
+};
+
 const ensureTeamIdsInMatch = (
   match: { teamAId: unknown; teamBId?: unknown | null },
   battingTeamId: string,
@@ -855,12 +890,19 @@ export const getAvailableNextBatters = async (tenantId: string, matchId: string)
 
   const innings = await scopedFindOne(InningsModel, tenantId, {
     _id: match.currentInningsId,
-    matchId,
-    status: 'LIVE'
+    matchId
   });
 
   if (!innings) {
     throw new AppError('Innings not found.', 404, 'innings.not_found');
+  }
+
+  if (innings.status !== 'LIVE') {
+    return {
+      strikerId: innings.strikerId.toString(),
+      nonStrikerId: innings.nonStrikerId.toString(),
+      items: []
+    };
   }
 
   const roster = await scopedFind(MatchPlayerModel, tenantId, {
@@ -1081,13 +1123,17 @@ export const changeCurrentBowler = async (input: ChangeCurrentBowlerInput) => {
     | { overNumber?: number; legalBallsInOver?: number; balls?: unknown[] }
     | undefined;
 
-  const legalBallsInOver = currentOver?.legalBallsInOver ?? 0;
+  const ballsPerOver = innings.ballsPerOver ?? tournament.ballsPerOver ?? 6;
+  const legalBallsInOver =
+    typeof currentOver?.legalBallsInOver === 'number' &&
+    Number.isFinite(currentOver.legalBallsInOver)
+      ? currentOver.legalBallsInOver
+      : innings.balls % ballsPerOver;
 
   if (legalBallsInOver !== 0) {
     throw new AppError('Current over is not finished.', 409, 'match.over_not_finished');
   }
 
-  const ballsPerOver = innings.ballsPerOver ?? tournament.ballsPerOver ?? 6;
   const oversPerInnings = innings.oversPerInnings ?? tournament.oversPerInnings;
   const completedOvers = Math.floor(innings.balls / ballsPerOver);
 
@@ -1104,6 +1150,67 @@ export const changeCurrentBowler = async (input: ChangeCurrentBowlerInput) => {
 
   if (!bowlerInXI) {
     throw new AppError('Bowler must be in bowling playing XI.', 400, 'match.bowler_invalid');
+  }
+
+  const isOverBoundary = innings.balls > 0 && innings.balls % ballsPerOver === 0;
+  if (isOverBoundary) {
+    const recentScoringEvents = await ScoreEventModel.find({
+      tenantId: input.tenantId,
+      inningsId: innings._id,
+      type: { $in: ['run', 'extra', 'wicket'] },
+      $and: [
+        { $or: [{ isUndone: false }, { isUndone: { $exists: false } }] },
+        { $or: [{ undoneAt: null }, { undoneAt: { $exists: false } }] }
+      ]
+    })
+      .sort({ seq: -1 })
+      .limit(12)
+      .select({ type: 1, isLegal: 1, payload: 1, beforeSnapshot: 1 });
+
+    const lastLegalDelivery = recentScoringEvents.find((event) =>
+      isLegalDeliveryEvent({
+        type: event.type,
+        isLegal: event.isLegal,
+        payload: event.payload as Record<string, unknown> | undefined
+      })
+    );
+
+    const beforeInnings =
+      (lastLegalDelivery?.beforeSnapshot as { innings?: { strikerId?: unknown; nonStrikerId?: unknown } })
+        ?.innings ?? null;
+    const beforeStrikerId =
+      beforeInnings?.strikerId != null ? String(beforeInnings.strikerId) : null;
+    const beforeNonStrikerId =
+      beforeInnings?.nonStrikerId != null ? String(beforeInnings.nonStrikerId) : null;
+
+    if (lastLegalDelivery && beforeStrikerId && beforeNonStrikerId) {
+      const completedRuns = getCompletedRunsForDelivery({
+        type: lastLegalDelivery.type,
+        payload: lastLegalDelivery.payload as Record<string, unknown> | undefined
+      });
+
+      const postBallPair =
+        completedRuns % 2 === 1
+          ? { strikerId: beforeNonStrikerId, nonStrikerId: beforeStrikerId }
+          : { strikerId: beforeStrikerId, nonStrikerId: beforeNonStrikerId };
+
+      // New over striker must be validated from the last legal delivery.
+      const expectedNextOverPair = {
+        strikerId: postBallPair.nonStrikerId,
+        nonStrikerId: postBallPair.strikerId
+      };
+
+      const currentStrikerId = innings.strikerId.toString();
+      const currentNonStrikerId = innings.nonStrikerId.toString();
+      if (
+        currentStrikerId !== expectedNextOverPair.strikerId ||
+        currentNonStrikerId !== expectedNextOverPair.nonStrikerId
+      ) {
+        innings.strikerId = expectedNextOverPair.strikerId as unknown as typeof innings.strikerId;
+        innings.nonStrikerId =
+          expectedNextOverPair.nonStrikerId as unknown as typeof innings.nonStrikerId;
+      }
+    }
   }
 
   innings.currentBowlerId = input.bowlerId as unknown as typeof innings.currentBowlerId;
@@ -1395,7 +1502,53 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
     ? await scopedFindOne(InningsModel, tenantId, { _id: match.currentInningsId, matchId })
     : null;
 
-  // Fallback for temporary linkage mismatch: resolve the active innings by match.
+  // For completed matches, always resolve to the final completed innings context.
+  // This avoids showing stale/reset snapshots when currentInningsId is cleared.
+  if (match.status === 'COMPLETED') {
+    const completedInnings = await scopedFind(InningsModel, tenantId, {
+      matchId,
+      status: 'COMPLETED'
+    }).sort({ inningsNumber: -1, createdAt: -1 });
+
+    if (completedInnings.length > 0) {
+      if (match.phase === 'SUPER_OVER') {
+        innings =
+          completedInnings.find((entry) => entry.inningsNumber === 4) ??
+          completedInnings.find((entry) => entry.inningsNumber === 3) ??
+          completedInnings[0];
+      } else {
+        innings =
+          completedInnings.find((entry) => entry.inningsNumber === 2) ??
+          completedInnings.find((entry) => entry.inningsNumber === 1) ??
+          completedInnings[0];
+      }
+    }
+  }
+
+  // Prefer a LIVE innings if the current pointer is stale (for example, still on innings 1 after innings 2 start).
+  const liveInnings =
+    match.status === 'COMPLETED'
+      ? null
+      : await scopedFind(InningsModel, tenantId, {
+          matchId,
+          status: 'LIVE'
+        })
+          .sort({ inningsNumber: -1, createdAt: -1 })
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+
+  if (
+    liveInnings &&
+    (!innings || innings.status !== 'LIVE' || innings._id.toString() !== liveInnings._id.toString())
+  ) {
+    innings = liveInnings;
+    if (!match.currentInningsId || match.currentInningsId.toString() !== liveInnings._id.toString()) {
+      match.currentInningsId = liveInnings._id;
+      await match.save();
+    }
+  }
+
+  // Fallback for temporary linkage mismatch: resolve the most recent innings by match.
   if (!innings) {
     innings = await scopedFind(InningsModel, tenantId, {
       matchId,

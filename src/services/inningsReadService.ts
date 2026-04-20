@@ -162,6 +162,18 @@ export const getBattersForInnings = async (tenantId: string, inningsId: string) 
       sixes: entry.sixes,
       isOut: entry.isOut,
       outKind: entry.outKind ?? null,
+      dismissalText:
+        entry.outKind === 'caught' && entry.outFielderName && entry.outBowlerName
+          ? `c ${entry.outFielderName} b ${entry.outBowlerName}`
+          : entry.outKind === 'stumping' && entry.outFielderName && entry.outBowlerName
+            ? `st ${entry.outFielderName} b ${entry.outBowlerName}`
+          : entry.outKind === 'runOut' && entry.outFielderName
+            ? `run out (${entry.outFielderName})`
+          : entry.outKind === 'lbw' && entry.outBowlerName
+            ? `lbw b ${entry.outBowlerName}`
+          : entry.outKind === 'bowled' && entry.outBowlerName
+            ? `b ${entry.outBowlerName}`
+            : null,
       sr: entry.balls > 0 ? Number(((entry.runs / entry.balls) * 100).toFixed(2)) : 0
     }))
   };

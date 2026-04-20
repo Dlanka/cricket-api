@@ -35,13 +35,13 @@ const wicketSchema = z
       'lbw',
       'stumping',
       'hitWicket',
-      'runOutStriker',
-      'runOutNonStriker',
+      'runOut',
       'obstructingField'
     ]),
     extraType: z.enum(['wide', 'noBall', 'none']).optional().default('none'),
     newBatterId: z.string().trim().min(1).optional(),
     newBatterName: z.string().trim().min(1).optional(),
+    fielderId: z.string().trim().min(1).optional(),
     runOutBatsman: z.enum(['striker', 'nonStriker']).optional(),
     runsWithWicket: z
       .union([
@@ -57,13 +57,25 @@ const wicketSchema = z
   })
   .superRefine((value, ctx) => {
     if (
-      (value.wicketType === 'runOutStriker' || value.wicketType === 'runOutNonStriker') &&
-      !value.runOutBatsman
+      value.wicketType === 'runOut' && !value.runOutBatsman
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'runOutBatsman is required for run out wicket types.',
         path: ['runOutBatsman']
+      });
+    }
+
+    if (
+      (value.wicketType === 'caught' ||
+        value.wicketType === 'stumping' ||
+        value.wicketType === 'runOut') &&
+      !value.fielderId
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'fielderId is required for this wicket type.',
+        path: ['fielderId']
       });
     }
   });

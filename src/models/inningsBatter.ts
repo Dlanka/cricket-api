@@ -56,6 +56,22 @@ const inningsBatterSchema = new Schema(
     outKind: {
       type: String
     },
+    outFielderId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Player'
+    },
+    outFielderName: {
+      type: String,
+      trim: true
+    },
+    outBowlerId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Player'
+    },
+    outBowlerName: {
+      type: String,
+      trim: true
+    },
     position: {
       type: Number
     }

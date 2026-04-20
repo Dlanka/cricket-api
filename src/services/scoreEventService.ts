@@ -12,6 +12,7 @@ import { AppError } from '../utils/appError';
 import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
 import { evaluateSecondInningsResult } from './utils/evaluateSecondInningsResult';
 import { syncKnockoutProgression, syncLeagueCompletionStatus } from './tournamentService';
+import { applyStrikeRotationForDelivery } from './utils/strikeRotation';
 
 type ScoreEventInput = {
   tenantId: string;
@@ -27,11 +28,11 @@ type ScoreEventInput = {
     | 'lbw'
     | 'stumping'
     | 'hitWicket'
-    | 'runOutStriker'
-    | 'runOutNonStriker'
+    | 'runOut'
     | 'obstructingField';
   newBatterId?: string;
   newBatterName?: string;
+  fielderId?: string;
   runOutBatsman?: 'striker' | 'nonStriker';
   runsWithWicket?: 0 | 1 | 2 | 3 | 4 | 5 | 6;
   retiringBatter?: 'striker' | 'nonStriker';
@@ -64,6 +65,10 @@ type Snapshot = {
     sixes: number;
     isOut: boolean;
     outKind?: string;
+    outFielderId?: string;
+    outFielderName?: string;
+    outBowlerId?: string;
+    outBowlerName?: string;
   }>;
   bowler: {
     id: string;
@@ -253,6 +258,23 @@ const pushBall = (
   ballsPerOver: number
 ) => {
   ensureCurrentOver(innings);
+  const legalBallsBeforeThisEvent = Math.max(0, innings.balls - (isLegal ? 1 : 0));
+  const derivedOverNumber = Math.floor(legalBallsBeforeThisEvent / ballsPerOver);
+  const derivedLegalBallsInOver = legalBallsBeforeThisEvent % ballsPerOver;
+
+  const parsedOverNumber = Number(innings.currentOver.overNumber);
+  innings.currentOver.overNumber = Number.isFinite(parsedOverNumber) && parsedOverNumber >= 0
+    ? parsedOverNumber
+    : derivedOverNumber;
+
+  const parsedLegalBalls = Number(innings.currentOver.legalBallsInOver);
+  innings.currentOver.legalBallsInOver =
+    Number.isFinite(parsedLegalBalls) &&
+    parsedLegalBalls >= 0 &&
+    parsedLegalBalls < ballsPerOver
+      ? parsedLegalBalls
+      : derivedLegalBallsInOver;
+
   innings.currentOver.balls.push({ seq, display, isLegal });
 
   let overEnded = false;
@@ -288,7 +310,11 @@ const snapshotBatter = (entry: any) => ({
   fours: entry.fours,
   sixes: entry.sixes,
   isOut: entry.isOut,
-  outKind: entry.outKind
+  outKind: entry.outKind,
+  outFielderId: entry.outFielderId?.toString(),
+  outFielderName: entry.outFielderName,
+  outBowlerId: entry.outBowlerId?.toString(),
+  outBowlerName: entry.outBowlerName
 });
 
 const snapshotBowler = (entry: any) => ({
@@ -369,7 +395,11 @@ const restoreSnapshot = async (tenantId: string, innings: any, snapshot: Snapsho
             fours: b.fours,
             sixes: b.sixes,
             isOut: b.isOut,
-            outKind: b.outKind
+            outKind: b.outKind,
+            outFielderId: b.outFielderId,
+            outFielderName: b.outFielderName,
+            outBowlerId: b.outBowlerId,
+            outBowlerName: b.outBowlerName
           }
         },
         { upsert: true }
@@ -414,6 +444,7 @@ const buildPayload = (input: ScoreEventInput, createdBatterStatId?: string) => {
     payload.extraType = input.extraType ?? 'none';
     payload.newBatterId = input.newBatterId;
     payload.newBatterName = input.newBatterName;
+    payload.fielderId = input.fielderId;
     payload.runOutBatsman = input.runOutBatsman;
     payload.runsWithWicket = input.runsWithWicket ?? 0;
   }
@@ -478,7 +509,10 @@ const buildEventMeta = (input: ScoreEventInput) => {
       };
     }
 
-    return { isLegal: true, summaryDisplay: 'W' };
+    return {
+      isLegal: true,
+      summaryDisplay: runsWithWicket > 0 ? `W+${runsWithWicket}` : 'W'
+    };
   }
 
   if (input.type === 'swap') {
@@ -890,7 +924,7 @@ const applyUndo = async (input: ScoreEventInput) => {
 };
 
 const shouldCreditBowlerWicket = (wicketType: string) =>
-  !['runOutStriker', 'runOutNonStriker', 'stumping', 'hitWicket', 'obstructingField'].includes(
+  !['runOut', 'stumping', 'hitWicket', 'obstructingField'].includes(
     wicketType
   );
 
@@ -900,14 +934,13 @@ const validateWicketExtraCombination = (wicketType: string, extraType: string) =
   }
 
   const wideAllowed = new Set([
-    'runOutStriker',
-    'runOutNonStriker',
+    'runOut',
     'stumping',
     'hitWicket',
     'obstructingField'
   ]);
 
-  const noBallAllowed = new Set(['runOutStriker', 'runOutNonStriker', 'obstructingField']);
+  const noBallAllowed = new Set(['runOut', 'obstructingField']);
 
   if (extraType === 'wide' && !wideAllowed.has(wicketType)) {
     throw new AppError('Invalid wicket type for wide delivery.', 400, 'score.wicket_extra_invalid');
@@ -977,6 +1010,8 @@ const applyEvent = async (input: ScoreEventInput) => {
   }
 
   if (input.type === 'run') {
+    const preBallStrikerId = innings.strikerId.toString();
+    const preBallNonStrikerId = innings.nonStrikerId.toString();
     const runs = input.runs as number;
 
     innings.runs += runs;
@@ -992,21 +1027,24 @@ const applyEvent = async (input: ScoreEventInput) => {
     if (runs === 4) bowler.foursConceded += 1;
     if (runs === 6) bowler.sixesConceded += 1;
 
-    if (runs % 2 === 1) {
-      swapStrike(innings);
-    }
-
     const overEnded = pushBall(innings, nextSeq, String(runs), true, context.ballsPerOver);
     if (maxLegalBalls > 0 && innings.balls >= maxLegalBalls) {
       innings.status = 'COMPLETED';
     }
-
-    if (overEnded && innings.status !== 'COMPLETED') {
-      swapStrike(innings);
-    }
+    const nextPair = applyStrikeRotationForDelivery({
+      strikerId: preBallStrikerId,
+      nonStrikerId: preBallNonStrikerId,
+      completedRuns: runs,
+      overEnded,
+      inningsCompleted: innings.status === 'COMPLETED'
+    });
+    innings.strikerId = nextPair.strikerId;
+    innings.nonStrikerId = nextPair.nonStrikerId;
   }
 
   if (input.type === 'extra') {
+    const preBallStrikerId = innings.strikerId.toString();
+    const preBallNonStrikerId = innings.nonStrikerId.toString();
     const extraType = input.extraType as string;
     const additionalRuns = input.additionalRuns ?? 0;
 
@@ -1055,23 +1093,27 @@ const applyEvent = async (input: ScoreEventInput) => {
       if (additionalRuns === 6) striker.sixes += 1;
     }
 
-    if (totalRuns % 2 === 1) {
-      swapStrike(innings);
-    }
-
+    const rotationRuns =
+      extraType === 'wide' || extraType === 'noBall' ? additionalRuns : totalRuns;
     const overEnded = pushBall(innings, nextSeq, display, isLegal, context.ballsPerOver);
     if (isLegal && maxLegalBalls > 0 && innings.balls >= maxLegalBalls) {
       innings.status = 'COMPLETED';
     }
-
-    if (overEnded && innings.status !== 'COMPLETED') {
-      swapStrike(innings);
-    }
+    const nextPair = applyStrikeRotationForDelivery({
+      strikerId: preBallStrikerId,
+      nonStrikerId: preBallNonStrikerId,
+      completedRuns: rotationRuns,
+      overEnded,
+      inningsCompleted: innings.status === 'COMPLETED'
+    });
+    innings.strikerId = nextPair.strikerId;
+    innings.nonStrikerId = nextPair.nonStrikerId;
   }
 
   if (input.type === 'wicket') {
     const wicketType = input.wicketType as string;
     const wicketExtraType = input.extraType ?? 'none';
+    const fielderId = input.fielderId?.trim();
     const runs = input.runsWithWicket ?? 0;
     const nextWickets = innings.wickets + 1;
     const isSuperOverInnings =
@@ -1081,9 +1123,24 @@ const applyEvent = async (input: ScoreEventInput) => {
     const isIllegalWicketDelivery = wicketExtraType === 'wide' || wicketExtraType === 'noBall';
     const penaltyRuns = wicketExtraType === 'wide' || wicketExtraType === 'noBall' ? 1 : 0;
     const totalRuns = penaltyRuns + runs;
-    const shouldRotateOnRuns = totalRuns % 2 === 1;
+    // Strike changes only on completed runs between wickets, not on penalty runs.
+    const shouldRotateOnRuns = runs % 2 === 1;
 
     validateWicketExtraCombination(wicketType, wicketExtraType);
+
+    const requiresFielder =
+      wicketType === 'caught' ||
+      wicketType === 'stumping' ||
+      wicketType === 'runOut';
+
+    if (requiresFielder) {
+      if (!fielderId) {
+        throw new AppError('Fielder is required for this wicket type.', 400, 'score.fielder_required');
+      }
+      if (!context.bowlingIds.has(fielderId)) {
+        throw new AppError('Fielder must be in bowling playing XI.', 400, 'score.fielder_invalid');
+      }
+    }
 
     if (!inningsEndsOnWicket && !input.newBatterId && !input.newBatterName) {
       throw new AppError('New batter is required.', 400, 'score.new_batter_required');
@@ -1098,19 +1155,31 @@ const applyEvent = async (input: ScoreEventInput) => {
     let fallen = striker;
     let fallenSide: 'striker' | 'nonStriker' = 'striker';
 
-    if (wicketType === 'runOutStriker' || wicketType === 'runOutNonStriker') {
+    if (wicketType === 'runOut') {
       fallenSide = input.runOutBatsman as 'striker' | 'nonStriker';
       fallen = fallenSide === 'striker' ? striker : nonStriker;
     }
 
     if (!isIllegalWicketDelivery) {
-      fallen.runs += runs;
-      fallen.balls += 1;
-      if (runs === 4) fallen.fours += 1;
-      if (runs === 6) fallen.sixes += 1;
+      // Bat runs and ball faced belong to the striker on a legal delivery,
+      // even when the non-striker is dismissed via run out.
+      striker.runs += runs;
+      striker.balls += 1;
+      if (runs === 4) striker.fours += 1;
+      if (runs === 6) striker.sixes += 1;
     }
     fallen.isOut = true;
     fallen.outKind = wicketType;
+    fallen.outBowlerId = bowler.playerId;
+    fallen.outBowlerName = bowler.name ?? '';
+    if (requiresFielder && fielderId) {
+      const fielderPlayer = await PlayerModel.findById(fielderId).select({ fullName: 1 });
+      fallen.outFielderId = fielderId;
+      fallen.outFielderName = fielderPlayer?.fullName ?? '';
+    } else {
+      fallen.outFielderId = undefined;
+      fallen.outFielderName = undefined;
+    }
 
     bowler.runsConceded += totalRuns;
     if (!isIllegalWicketDelivery) {
@@ -1167,7 +1236,9 @@ const applyEvent = async (input: ScoreEventInput) => {
           ? runs > 0
             ? `Nb+${runs}+W`
             : 'Nb+W'
-          : 'W';
+          : runs > 0
+            ? `W+${runs}`
+            : 'W';
 
     const overEnded = pushBall(
       innings,

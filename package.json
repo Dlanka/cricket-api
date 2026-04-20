@@ -14,6 +14,7 @@
     "tournament-tenant-check": "ts-node-dev --transpile-only --exit-child src/scripts/tournamentTenantCheck.ts",
     "available-next-batters-check": "ts-node-dev --transpile-only --exit-child src/scripts/availableNextBattersCheck.ts",
     "seed:tournament-bundle": "ts-node-dev --transpile-only --exit-child src/scripts/seedTournamentBundle.ts",
+    "strike-rotation-check": "node -r ts-node/register/transpile-only src/scripts/strikeRotationCheck.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "license": "MIT",

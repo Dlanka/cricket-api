@@ -173,10 +173,7 @@ const extractDismissedBatter = (beforeSnapshot: unknown, payload: EventPayload) 
   const wicketType = asStringOrNull(payload.wicketType);
   const runOutBatsman = asStringOrNull(payload.runOutBatsman);
 
-  const fallenSide =
-    wicketType === 'runOutStriker' || wicketType === 'runOutNonStriker'
-      ? runOutBatsman ?? 'striker'
-      : 'striker';
+  const fallenSide = wicketType === 'runOut' ? runOutBatsman ?? 'striker' : 'striker';
 
   const batterStatId =
     fallenSide === 'nonStriker'
@@ -510,7 +507,7 @@ export const getMatchSummary = async (tenantId: string, matchId: string) => {
   const winnerTeamId = match.result?.winnerTeamId?.toString() ?? null;
   const winnerTeamName = winnerTeamId ? (teamMap.get(winnerTeamId)?.name ?? null) : null;
 
-  let outcome: MatchOutcome = rawOutcome;
+  const outcome: MatchOutcome = rawOutcome;
   let winByRuns = match.result?.winByRuns ?? null;
   let winByWickets = match.result?.winByWickets ?? match.result?.winByWkts ?? null;
 
