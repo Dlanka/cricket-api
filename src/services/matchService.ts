@@ -142,23 +142,6 @@ const ensureTeamIdsInMatch = (
   }
 };
 
-const resolveCurrentBatterId = async (tenantId: string, inningsId: string, onFieldId: string) => {
-  const direct = await scopedFindOne(InningsBatterModel, tenantId, {
-    _id: onFieldId,
-    inningsId
-  });
-  if (direct) {
-    return direct._id.toString();
-  }
-
-  const byPlayer = await scopedFindOne(InningsBatterModel, tenantId, {
-    inningsId,
-    $or: [{ 'playerRef.playerId': onFieldId }, { 'batterKey.playerId': onFieldId }]
-  });
-
-  return byPlayer?._id.toString() ?? onFieldId;
-};
-
 type KnockoutStage = 'R1' | 'QF' | 'SF' | 'FINAL';
 type MatchStage = 'LEAGUE' | KnockoutStage;
 
@@ -1496,8 +1479,6 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
     });
   }
 
-  const tournament = await ensureTournament(tenantId, match.tournamentId.toString());
-
   let innings = match.currentInningsId
     ? await scopedFindOne(InningsModel, tenantId, { _id: match.currentInningsId, matchId })
     : null;
@@ -1529,13 +1510,10 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
   const liveInnings =
     match.status === 'COMPLETED'
       ? null
-      : await scopedFind(InningsModel, tenantId, {
+      : await scopedFindOne(InningsModel, tenantId, {
           matchId,
           status: 'LIVE'
-        })
-          .sort({ inningsNumber: -1, createdAt: -1 })
-          .limit(1)
-          .then((rows) => rows[0] ?? null);
+        }).sort({ inningsNumber: -1, createdAt: -1 });
 
   if (
     liveInnings &&
@@ -1574,10 +1552,11 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
     await match.save();
   }
 
-  const ballsPerOver = innings.ballsPerOver ?? tournament.ballsPerOver ?? 6;
-  const oversPerInnings = innings.oversPerInnings ?? tournament.oversPerInnings;
+  const ballsPerOver = innings.ballsPerOver ?? match.ballsPerOver ?? 6;
+  const oversPerInnings = innings.oversPerInnings ?? match.oversPerInnings ?? 1;
+  const onFieldIds = [innings.strikerId.toString(), innings.nonStrikerId.toString()];
 
-  const [battingTeam, bowlingTeam, lastEvent, strikerBatterId, nonStrikerBatterId] = await Promise.all([
+  const [battingTeam, bowlingTeam, lastEvent, onFieldBatters] = await Promise.all([
     scopedFindOne(TeamModel, tenantId, { _id: innings.battingTeamId }),
     scopedFindOne(TeamModel, tenantId, { _id: innings.bowlingTeamId }),
     ScoreEventModel.findOne({
@@ -1585,14 +1564,47 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
       matchId,
       inningsId: innings._id,
       isUndone: false
-    }).sort({ seq: -1 }),
-    resolveCurrentBatterId(tenantId, innings._id.toString(), innings.strikerId.toString()),
-    resolveCurrentBatterId(tenantId, innings._id.toString(), innings.nonStrikerId.toString())
+    })
+      .sort({ seq: -1 })
+      .select({ _id: 1, seq: 1, type: 1 }),
+    scopedFind(InningsBatterModel, tenantId, {
+      inningsId: innings._id,
+      $or: [
+        { _id: { $in: onFieldIds } },
+        { 'playerRef.playerId': { $in: onFieldIds } },
+        { 'batterKey.playerId': { $in: onFieldIds } }
+      ]
+    }).select({ _id: 1, playerRef: 1, batterKey: 1 })
   ]);
 
   if (!battingTeam || !bowlingTeam) {
     throw new AppError('Team not found.', 404, 'team.not_found');
   }
+
+  const onFieldPlayerToBatter = new Map<string, string>();
+  const onFieldBatterIds = new Set<string>();
+  onFieldBatters.forEach((entry) => {
+    const batterId = entry._id.toString();
+    onFieldBatterIds.add(batterId);
+    const playerRefId = entry.playerRef?.playerId?.toString();
+    if (playerRefId) {
+      onFieldPlayerToBatter.set(playerRefId, batterId);
+    }
+    const batterKeyPlayerId = entry.batterKey?.playerId?.toString();
+    if (batterKeyPlayerId) {
+      onFieldPlayerToBatter.set(batterKeyPlayerId, batterId);
+    }
+  });
+
+  const resolveOnFieldBatterId = (rawId: string) => {
+    if (onFieldBatterIds.has(rawId)) {
+      return rawId;
+    }
+    return onFieldPlayerToBatter.get(rawId) ?? rawId;
+  };
+
+  const strikerBatterId = resolveOnFieldBatterId(innings.strikerId.toString());
+  const nonStrikerBatterId = resolveOnFieldBatterId(innings.nonStrikerId.toString());
 
   let chase:
     | {
@@ -1617,16 +1629,19 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
     | null = null;
 
   if (innings.inningsNumber === 2) {
-    const firstInnings = await scopedFindOne(InningsModel, tenantId, {
-      matchId,
-      inningsNumber: 1
-    });
-
-    if (!firstInnings) {
-      throw new AppError('First innings not found.', 404, 'innings.not_found');
+    let firstInningsRuns = match.firstInningsRuns;
+    if (typeof firstInningsRuns !== 'number') {
+      const firstInnings = await scopedFindOne(InningsModel, tenantId, {
+        matchId,
+        inningsNumber: 1
+      }).select({ runs: 1 });
+      if (!firstInnings) {
+        throw new AppError('First innings not found.', 404, 'innings.not_found');
+      }
+      firstInningsRuns = firstInnings.runs;
     }
 
-    const targetRuns = match.secondInningsTarget ?? firstInnings.runs + 1;
+    const targetRuns = match.secondInningsTarget ?? firstInningsRuns + 1;
     const maxBalls = oversPerInnings * ballsPerOver;
     const ballsRemaining = Math.max(0, maxBalls - innings.balls);
     const runsNeeded = Math.max(0, targetRuns - innings.runs);
@@ -1638,7 +1653,7 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
       runsRemaining: runsNeeded,
       maxLegalBalls: maxBalls,
       target: targetRuns,
-      firstInningsRuns: firstInnings.runs,
+      firstInningsRuns,
       runsNeeded,
       ballsRemaining,
       requiredRunRate
@@ -1679,24 +1694,28 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
       }
     : null;
 
-  const superOverInnings = await scopedFind(InningsModel, tenantId, {
-    matchId,
-    inningsNumber: { $in: [3, 4] }
-  });
-  const superOverInnings3 = superOverInnings.find((entry) => entry.inningsNumber === 3);
-  const superOverInnings4 = superOverInnings.find((entry) => entry.inningsNumber === 4);
-  const resolveSuperOverRuns = (teamId: string | null) => {
-    if (!teamId) return 0;
-    if (superOverInnings3 && superOverInnings3.battingTeamId.toString() === teamId) {
-      return superOverInnings3.runs;
-    }
-    if (superOverInnings4 && superOverInnings4.battingTeamId.toString() === teamId) {
-      return superOverInnings4.runs;
-    }
-    return 0;
-  };
-  const teamARuns = resolveSuperOverRuns(match.teamAId.toString());
-  const teamBRuns = resolveSuperOverRuns(match.teamBId?.toString() ?? null);
+  let teamARuns = 0;
+  let teamBRuns = 0;
+  if (match.phase === 'SUPER_OVER' || match.hasSuperOver || match.superOverStatus) {
+    const superOverInnings = await scopedFind(InningsModel, tenantId, {
+      matchId,
+      inningsNumber: { $in: [3, 4] }
+    }).select({ inningsNumber: 1, battingTeamId: 1, runs: 1 });
+    const superOverInnings3 = superOverInnings.find((entry) => entry.inningsNumber === 3);
+    const superOverInnings4 = superOverInnings.find((entry) => entry.inningsNumber === 4);
+    const resolveSuperOverRuns = (teamId: string | null) => {
+      if (!teamId) return 0;
+      if (superOverInnings3 && superOverInnings3.battingTeamId.toString() === teamId) {
+        return superOverInnings3.runs;
+      }
+      if (superOverInnings4 && superOverInnings4.battingTeamId.toString() === teamId) {
+        return superOverInnings4.runs;
+      }
+      return 0;
+    };
+    teamARuns = resolveSuperOverRuns(match.teamAId.toString());
+    teamBRuns = resolveSuperOverRuns(match.teamBId?.toString() ?? null);
+  }
 
   let wides =
     typeof (innings as { wides?: unknown }).wides === 'number'
