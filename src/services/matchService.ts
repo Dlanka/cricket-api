@@ -10,6 +10,11 @@ import { InningsBatterModel } from '../models/inningsBatter';
 import { AppError } from '../utils/appError';
 import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
 import { syncKnockoutProgression } from './tournamentService';
+import {
+  getCachedMatchScore,
+  invalidateCachedMatchScore,
+  setCachedMatchScore
+} from './utils/matchScoreCache';
 
 const ensureObjectId = (id: string, message: string) => {
   if (!isValidObjectId(id)) {
@@ -559,6 +564,7 @@ export const updateMatchConfig = async (input: UpdateMatchConfigInput) => {
   }
 
   await match.save();
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -620,6 +626,7 @@ export const resolveMatchTie = async (input: ResolveMatchTieInput) => {
     match.superOverStatus = 'COMPLETED';
   }
   await match.save();
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
 
   const progression = await syncKnockoutProgression(
     input.tenantId,
@@ -1070,6 +1077,7 @@ export const startMatch = async (input: StartMatchInput) => {
   } else {
     await match.save();
   }
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -1198,6 +1206,7 @@ export const changeCurrentBowler = async (input: ChangeCurrentBowlerInput) => {
 
   innings.currentBowlerId = input.bowlerId as unknown as typeof innings.currentBowlerId;
   await innings.save();
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -1327,6 +1336,7 @@ export const startSecondInnings = async (input: StartSecondInningsInput) => {
   };
   match.currentInningsId = innings._id;
   await match.save();
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -1456,6 +1466,7 @@ export const startSuperOver = async (input: StartSuperOverInput) => {
   match.status = 'LIVE';
   match.currentInningsId = superOverInnings1._id;
   await match.save();
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -1466,9 +1477,17 @@ export const startSuperOver = async (input: StartSuperOverInput) => {
   };
 };
 
-export const getMatchScore = async (tenantId: string, matchId: string) => {
+export const getMatchScore = async (
+  tenantId: string,
+  matchId: string
+): Promise<Record<string, unknown>> => {
   ensureObjectId(tenantId, 'Invalid tenant id.');
   ensureObjectId(matchId, 'Invalid match id.');
+
+  const cached = getCachedMatchScore<Record<string, unknown>>(tenantId, matchId);
+  if (cached) {
+    return cached;
+  }
 
   const match = await ensureMatch(tenantId, matchId);
 
@@ -1803,7 +1822,7 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
     await innings.save();
   }
 
-  return {
+  const response = {
     matchId: match._id.toString(),
     inningsId: innings._id.toString(),
     inningsNumber: innings.inningsNumber,
@@ -1859,4 +1878,6 @@ export const getMatchScore = async (tenantId: string, matchId: string) => {
     isMatchCompleted: match.status === 'COMPLETED',
     result
   };
+  setCachedMatchScore(tenantId, matchId, response);
+  return response;
 };

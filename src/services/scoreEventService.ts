@@ -11,6 +11,7 @@ import { TournamentModel } from '../models/tournament';
 import { AppError } from '../utils/appError';
 import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
 import { evaluateSecondInningsResult } from './utils/evaluateSecondInningsResult';
+import { invalidateCachedMatchScore } from './utils/matchScoreCache';
 import { syncKnockoutProgression, syncLeagueCompletionStatus } from './tournamentService';
 import { applyStrikeRotationForDelivery } from './utils/strikeRotation';
 
@@ -874,6 +875,7 @@ const applyUndo = async (input: ScoreEventInput) => {
     createdByUserId: input.createdByUserId
   });
 
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
   const score = await getScoreboard(context);
 
   return {
@@ -1445,6 +1447,7 @@ const applyEvent = async (input: ScoreEventInput) => {
     createdByUserId: input.createdByUserId
   });
 
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
   const score = await getScoreboard(context);
 
   return {
