@@ -881,8 +881,38 @@ const emitLiveScoreUpdateAsync = (tenantId: string, matchId: string) => {
   })();
 };
 
+const runPostMatchSyncAsync = (
+  tenantId: string,
+  tournamentId: string,
+  matchId: string,
+  shouldSyncKnockout: boolean
+) => {
+  void (async () => {
+    try {
+      await Promise.all([
+        syncLeagueCompletionStatus(tenantId, tournamentId),
+        shouldSyncKnockout
+          ? syncKnockoutProgression(tenantId, tournamentId, matchId)
+          : Promise.resolve({ created: 0, stage: null, roundNumber: null })
+      ]);
+    } catch (error) {
+      logger.warn(
+        { err: error, tenantId, tournamentId, matchId, shouldSyncKnockout },
+        'Post-match sync failed after score-event'
+      );
+    }
+  })();
+};
+
 const applyEvent = async (input: ScoreEventInput) => {
   const startedAt = Date.now();
+  const phase = {
+    preMs: 0,
+    mutateMs: 0,
+    saveMs: 0,
+    eventInsertMs: 0,
+    postMs: 0
+  };
   const context = await ensureLiveContext(input.tenantId, input.matchId, false, false);
   let rosterIds: { battingIds: Set<string>; bowlingIds: Set<string> } | null = null;
   const ensureRosterIds = async () => {
@@ -928,6 +958,21 @@ const applyEvent = async (input: ScoreEventInput) => {
     innings._id.toString(),
     innings.currentBowlerId.toString()
   );
+  const knownBatterDocs = new Map<string, any>();
+  const registerBatter = (entry: any | undefined) => {
+    if (!entry || !entry._id) return;
+    knownBatterDocs.set(entry._id.toString(), entry);
+    const playerRefId = entry.playerRef?.playerId?.toString();
+    if (playerRefId) {
+      knownBatterDocs.set(playerRefId, entry);
+    }
+    const batterKeyPlayerId = entry.batterKey?.playerId?.toString();
+    if (batterKeyPlayerId) {
+      knownBatterDocs.set(batterKeyPlayerId, entry);
+    }
+  };
+  registerBatter(striker);
+  registerBatter(nonStriker);
   const nextSeq = innings.eventSeq + 1;
   const maxLegalBalls = getMaxLegalBalls(innings, context.ballsPerOver);
 
@@ -937,8 +982,8 @@ const applyEvent = async (input: ScoreEventInput) => {
     throw new AppError('Configured overs are completed.', 409, 'match.overs_completed');
   }
 
-  const involved = new Set([striker._id.toString(), nonStriker._id.toString()]);
   const beforeSnapshot = buildSnapshotFromState(innings, [striker, nonStriker], bowler);
+  phase.preMs = Date.now() - startedAt;
 
   let createdBatterStatId: string | undefined;
   let createdBatterDoc: any | undefined;
@@ -970,8 +1015,8 @@ const applyEvent = async (input: ScoreEventInput) => {
     }
 
     createdBatterDoc = newBatter;
+    registerBatter(newBatter);
     createdBatterStatId = newBatter._id.toString();
-    involved.add(createdBatterStatId);
   }
 
   if (input.type === 'run') {
@@ -1204,8 +1249,8 @@ const applyEvent = async (input: ScoreEventInput) => {
       }
 
       createdBatterDoc = newBatter;
+      registerBatter(newBatter);
       createdBatterStatId = newBatter._id.toString();
-      involved.add(createdBatterStatId);
     } else {
       innings.status = 'COMPLETED';
     }
@@ -1239,19 +1284,18 @@ const applyEvent = async (input: ScoreEventInput) => {
     }
   }
 
-  const currentStriker = await resolveBatter(
-    input.tenantId,
-    innings._id.toString(),
-    innings.strikerId.toString()
-  );
-  const currentNonStriker = await resolveBatter(
-    input.tenantId,
-    innings._id.toString(),
-    innings.nonStrikerId.toString()
-  );
+  const resolveCurrentBatterDoc = async (onFieldId: string) => {
+    const found = knownBatterDocs.get(onFieldId);
+    if (found) {
+      return found;
+    }
+    const resolved = await resolveBatter(input.tenantId, innings._id.toString(), onFieldId);
+    registerBatter(resolved);
+    return resolved;
+  };
 
-  involved.add(currentStriker._id.toString());
-  involved.add(currentNonStriker._id.toString());
+  const currentStriker = await resolveCurrentBatterDoc(innings.strikerId.toString());
+  const currentNonStriker = await resolveCurrentBatterDoc(innings.nonStrikerId.toString());
 
   if (innings.inningsNumber === 2) {
     const innings1 = await scopedFindOne(InningsModel, input.tenantId, {
@@ -1402,6 +1446,7 @@ const applyEvent = async (input: ScoreEventInput) => {
 
     matchCompletedNow = true;
   }
+  phase.mutateMs = Date.now() - startedAt - phase.preMs;
 
   innings.eventSeq += 1;
   innings.lastSeq = innings.eventSeq;
@@ -1415,19 +1460,17 @@ const applyEvent = async (input: ScoreEventInput) => {
     saves.push(context.match.save());
   }
 
+  const saveStartedAt = Date.now();
   await Promise.all(saves);
+  phase.saveMs = Date.now() - saveStartedAt;
 
   if (matchCompletedNow) {
-    await Promise.all([
-      syncLeagueCompletionStatus(input.tenantId, context.match.tournamentId.toString()),
+    runPostMatchSyncAsync(
+      input.tenantId,
+      context.match.tournamentId.toString(),
+      context.match._id.toString(),
       shouldSyncKnockout
-        ? syncKnockoutProgression(
-          input.tenantId,
-          context.match.tournamentId.toString(),
-          context.match._id.toString()
-        )
-        : Promise.resolve({ created: 0, stage: null, roundNumber: null })
-    ]);
+    );
   }
 
   const afterSnapshot = buildSnapshotFromState(
@@ -1438,6 +1481,7 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   const meta = buildEventMeta(input);
 
+  const eventInsertStartedAt = Date.now();
   const event = await ScoreEventModel.create({
     tenantId: input.tenantId,
     matchId: input.matchId,
@@ -1451,15 +1495,18 @@ const applyEvent = async (input: ScoreEventInput) => {
     afterSnapshot,
     createdByUserId: input.createdByUserId
   });
+  phase.eventInsertMs = Date.now() - eventInsertStartedAt;
 
+  const postStartedAt = Date.now();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
   emitMatchScoreRefresh(input.tenantId, input.matchId);
   emitLiveScoreUpdateAsync(input.tenantId, input.matchId);
+  phase.postMs = Date.now() - postStartedAt;
 
   const durationMs = Date.now() - startedAt;
   if (durationMs > 1200) {
     logger.warn(
-      { tenantId: input.tenantId, matchId: input.matchId, eventType: input.type, durationMs },
+      { tenantId: input.tenantId, matchId: input.matchId, eventType: input.type, durationMs, phases: phase },
       'Slow score-event processing'
     );
   }
