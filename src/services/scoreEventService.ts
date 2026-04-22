@@ -100,12 +100,6 @@ const ensureObjectId = (id: string, message: string) => {
   }
 };
 
-const formatOvers = (balls: number, ballsPerOver: number) => {
-  const completedOvers = Math.floor(balls / ballsPerOver);
-  const ballsInOver = balls % ballsPerOver;
-  return `${completedOvers}.${ballsInOver}`;
-};
-
 const ensureCurrentOver = (innings: any) => {
   if (!innings.currentOver) {
     innings.currentOver = { overNumber: 0, legalBallsInOver: 0, balls: [] };
@@ -553,90 +547,6 @@ const buildEventMeta = (input: ScoreEventInput) => {
   return { isLegal: false, summaryDisplay: 'Undo' };
 };
 
-const getScoreboard = async (context: any) => {
-  const inningsId = context.innings._id.toString();
-  const tenantId = context.innings.tenantId.toString();
-  const matchId = context.match._id.toString();
-  ensureInningsExtras(context.innings);
-
-  const [batters, bowlers] = await Promise.all([
-    scopedFind(InningsBatterModel, tenantId, { inningsId }).sort({ createdAt: 1 }),
-    scopedFind(InningsBowlerModel, tenantId, { inningsId }).sort({ createdAt: 1 })
-  ]);
-
-  ensureCurrentOver(context.innings);
-
-  const asBatterId = (rawOnFieldId: string) => {
-    const direct = batters.find((entry) => entry._id.toString() === rawOnFieldId);
-    if (direct) {
-      return direct._id.toString();
-    }
-
-    const byPlayer = batters.find(
-      (entry) =>
-        entry.playerRef?.playerId?.toString() === rawOnFieldId ||
-        entry.batterKey?.playerId?.toString() === rawOnFieldId
-    );
-
-    return byPlayer?._id.toString() ?? rawOnFieldId;
-  };
-
-  return {
-    matchId,
-    inningsId,
-    score: {
-      runs: context.innings.runs,
-      wickets: context.innings.wickets,
-      balls: context.innings.balls,
-      overs: formatOvers(context.innings.balls, context.ballsPerOver),
-      extras: context.innings.extras ?? 0,
-      wides: context.innings.wides ?? 0,
-      noBalls: context.innings.noBalls ?? 0,
-      byes: context.innings.byes ?? 0,
-      legByes: context.innings.legByes ?? 0
-    },
-    inningsCompleted: context.innings.status === 'COMPLETED',
-    current: {
-      strikerId: asBatterId(context.innings.strikerId.toString()),
-      nonStrikerId: asBatterId(context.innings.nonStrikerId.toString()),
-      bowlerId: context.innings.currentBowlerId.toString()
-    },
-    batters: batters.map((entry) => ({
-      batterId: entry._id.toString(),
-      name: entry.playerRef?.name ?? 'Unknown',
-      runs: entry.runs,
-      balls: entry.balls,
-      fours: entry.fours,
-      sixes: entry.sixes,
-      isOut: entry.isOut
-    })),
-    bowlers: bowlers.map((entry) => {
-      const overs = entry.balls / context.ballsPerOver;
-      const economy = overs > 0 ? Number((entry.runsConceded / overs).toFixed(2)) : 0;
-
-      return {
-        bowlerId: entry.playerId.toString(),
-        runsConceded: entry.runsConceded,
-        balls: entry.balls,
-        wickets: entry.wickets,
-        foursConceded: entry.foursConceded,
-        sixesConceded: entry.sixesConceded,
-        wides: entry.wides,
-        noBalls: entry.noBalls,
-        economy
-      };
-    }),
-    currentOver: {
-      overNumber: context.innings.currentOver.overNumber,
-      balls: context.innings.currentOver.balls.map((ball: any) => ({
-        seq: typeof ball.seq === 'number' ? ball.seq : undefined,
-        display: ball.display,
-        isLegal: ball.isLegal
-      }))
-    }
-  };
-};
-
 const createNamedBatter = async (tenantId: string, inningsId: string, name: string) =>
   InningsBatterModel.create({
     tenantId,
@@ -880,7 +790,6 @@ const applyUndo = async (input: ScoreEventInput) => {
   });
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
-  const score = await getScoreboard(context);
   emitMatchScoreRefresh(input.tenantId, input.matchId);
   emitLiveScoreUpdateAsync(input.tenantId, input.matchId);
 
@@ -893,7 +802,10 @@ const applyUndo = async (input: ScoreEventInput) => {
   }
 
   return {
-    ...score,
+    matchId: input.matchId,
+    inningsId: context.innings._id.toString(),
+    inningsCompleted: context.innings.status === 'COMPLETED',
+    isMatchCompleted: context.match.status === 'COMPLETED',
     event: {
       id: undoEvent._id.toString(),
       type: undoEvent.type,
@@ -1477,7 +1389,6 @@ const applyEvent = async (input: ScoreEventInput) => {
   });
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
-  const score = await getScoreboard(context);
   emitMatchScoreRefresh(input.tenantId, input.matchId);
   emitLiveScoreUpdateAsync(input.tenantId, input.matchId);
 
@@ -1490,7 +1401,10 @@ const applyEvent = async (input: ScoreEventInput) => {
   }
 
   return {
-    ...score,
+    matchId: input.matchId,
+    inningsId: innings._id.toString(),
+    inningsCompleted: innings.status === 'COMPLETED',
+    isMatchCompleted: context.match.status === 'COMPLETED',
     event: {
       id: event._id.toString(),
       type: event.type,
