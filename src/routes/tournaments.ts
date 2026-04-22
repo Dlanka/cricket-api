@@ -4,6 +4,7 @@ import { requireAction } from '../middleware/requireAction';
 import {
   createTournamentHandler,
   deleteTournamentHandler,
+  duplicateTournamentHandler,
   generateKnockoutFromLeagueHandler,
   getTournamentHandler,
   getTournamentPlayerOfSeriesHandler,
@@ -46,6 +47,13 @@ tournamentRoutes.delete(
   requireAuthApp,
   requireAction('tournament.manage'),
   deleteTournamentHandler
+);
+
+tournamentRoutes.post(
+  '/tournaments/:id/duplicate',
+  requireAuthApp,
+  requireAction('tournament.manage'),
+  duplicateTournamentHandler
 );
 
 tournamentRoutes.post(

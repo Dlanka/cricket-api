@@ -81,6 +81,13 @@ export const ENDPOINT_AUTH_MATRIX: EndpointAuthMatrixRow[] = [
   },
   {
     method: 'POST',
+    path: '/tournaments/:id/duplicate',
+    action: 'tournament.manage',
+    auth: 'app',
+    area: 'tournaments'
+  },
+  {
+    method: 'POST',
     path: '/tournaments/:id/recompute-standings',
     action: 'tournament.manage',
     auth: 'app',
@@ -133,6 +140,13 @@ export const ENDPOINT_AUTH_MATRIX: EndpointAuthMatrixRow[] = [
     method: 'GET',
     path: '/tournaments/:tournamentId/teams',
     action: null,
+    auth: 'app',
+    area: 'teams'
+  },
+  {
+    method: 'PATCH',
+    path: '/tournaments/:tournamentId/teams/order',
+    action: 'tournament.manage',
     auth: 'app',
     area: 'teams'
   },

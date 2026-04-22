@@ -63,6 +63,12 @@ export type TournamentUpdateInput = {
   };
 };
 
+export type DuplicateTournamentInput = {
+  tenantId: string;
+  id: string;
+  name?: string;
+};
+
 type StandingRow = {
   teamId: string;
   teamName: string;
@@ -384,7 +390,7 @@ const getLeagueStandingsRows = async (tenantId: string, tournamentId: string) =>
   }
 
   const [teams, leagueMatches] = await Promise.all([
-    scopedFind(TeamModel, tenantId, { tournamentId }).sort({ createdAt: 1 }),
+    scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 }),
     scopedFind(MatchModel, tenantId, { tournamentId, stage: 'LEAGUE' }).sort({ createdAt: 1 })
   ]);
   const pointsRules = getPointsRules(tournament);
@@ -556,6 +562,104 @@ export const createTournament = async (input: TournamentCreateInput) => {
   });
 
   return tournament;
+};
+
+export const duplicateTournament = async (input: DuplicateTournamentInput) => {
+  ensureObjectId(input.tenantId, 'Invalid tenant id.');
+  ensureObjectId(input.id, 'Invalid tournament id.');
+
+  const sourceTournament = await scopedFindOne(TournamentModel, input.tenantId, { _id: input.id });
+  if (!sourceTournament) {
+    throw new AppError('Tournament not found.', 404, 'tournament.not_found');
+  }
+
+  const duplicatedTournament = await TournamentModel.create({
+    tenantId: input.tenantId,
+    name: input.name?.trim() || `${sourceTournament.name} (Copy)`,
+    location: sourceTournament.location,
+    startDate: sourceTournament.startDate,
+    endDate: sourceTournament.endDate,
+    type: sourceTournament.type,
+    oversPerInnings: sourceTournament.oversPerInnings,
+    ballsPerOver: sourceTournament.ballsPerOver,
+    status: 'DRAFT',
+    rules: {
+      points: {
+        win: sourceTournament.rules?.points?.win ?? 2,
+        tie: sourceTournament.rules?.points?.tie ?? 1,
+        noResult: sourceTournament.rules?.points?.noResult ?? 1,
+        loss: sourceTournament.rules?.points?.loss ?? 0
+      },
+      qualificationCount: sourceTournament.rules?.qualificationCount ?? 4,
+      seeding: sourceTournament.rules?.seeding ?? 'STANDARD'
+    },
+    stageStatus: {
+      league: 'PENDING',
+      knockout: 'PENDING'
+    }
+  });
+
+  const sourceTeams = await scopedFind(TeamModel, input.tenantId, {
+    tournamentId: sourceTournament._id
+  }).sort({ sortOrder: 1, createdAt: 1 });
+
+  const oldToNewTeamId = new Map<string, string>();
+  if (sourceTeams.length > 0) {
+    const createdTeams = await TeamModel.insertMany(
+      sourceTeams.map((team) => ({
+        tenantId: input.tenantId,
+        tournamentId: duplicatedTournament._id,
+        name: team.name,
+        shortName: team.shortName,
+        contactPerson: team.contactPerson,
+        contactNumber: team.contactNumber,
+        sortOrder: team.sortOrder ?? 0,
+        sourceType: team.sourceType
+      }))
+    );
+
+    sourceTeams.forEach((team, index) => {
+      oldToNewTeamId.set(team._id.toString(), createdTeams[index]._id.toString());
+    });
+  }
+
+  const sourceTeamIds = sourceTeams.map((team) => team._id.toString());
+  const sourcePlayers = sourceTeamIds.length
+    ? await scopedFind(PlayerModel, input.tenantId, {
+        teamId: { $in: sourceTeamIds }
+      }).sort({ createdAt: 1 })
+    : [];
+
+  if (sourcePlayers.length > 0) {
+    await PlayerModel.insertMany(
+      sourcePlayers
+        .map((player) => {
+          const mappedTeamId = oldToNewTeamId.get(player.teamId.toString());
+          if (!mappedTeamId) {
+            return null;
+          }
+          return {
+            tenantId: input.tenantId,
+            teamId: mappedTeamId,
+            fullName: player.fullName,
+            jerseyNumber: player.jerseyNumber,
+            battingStyle: player.battingStyle,
+            bowlingStyle: player.bowlingStyle,
+            isWicketKeeper: player.isWicketKeeper
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    );
+  }
+
+  return {
+    id: duplicatedTournament._id.toString(),
+    tournamentId: duplicatedTournament._id.toString(),
+    copied: {
+      teams: sourceTeams.length,
+      players: sourcePlayers.length
+    }
+  };
 };
 
 export const listTournaments = async (tenantId: string) => {

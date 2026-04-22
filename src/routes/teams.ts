@@ -6,6 +6,7 @@ import {
   deleteTeamHandler,
   getTeamHandler,
   listTeamsHandler,
+  reorderTeamsHandler,
   updateTeamHandler
 } from '../controllers/teamController';
 
@@ -18,6 +19,12 @@ teamRoutes.post(
   createTeamHandler
 );
 teamRoutes.get('/tournaments/:tournamentId/teams', requireAuthApp, listTeamsHandler);
+teamRoutes.patch(
+  '/tournaments/:tournamentId/teams/order',
+  requireAuthApp,
+  requireAction('tournament.manage'),
+  reorderTeamsHandler
+);
 teamRoutes.get('/teams/:id', requireAuthApp, getTeamHandler);
 teamRoutes.patch('/teams/:id', requireAuthApp, requireAction('tournament.manage'), updateTeamHandler);
 teamRoutes.delete('/teams/:id', requireAuthApp, requireAction('tournament.manage'), deleteTeamHandler);

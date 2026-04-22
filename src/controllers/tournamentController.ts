@@ -5,6 +5,7 @@ import { AppError } from '../utils/appError';
 import {
   createTournament,
   deleteTournament,
+  duplicateTournament,
   generateKnockoutFromLeague,
   getTournamentById,
   getTournamentPlayerOfSeries,
@@ -72,6 +73,9 @@ const updateTournamentSchema = z
 const idSchema = z.object({
   id: z.string().min(1)
 });
+const duplicateTournamentSchema = z.object({
+  name: z.string().trim().min(1).optional()
+});
 
 const getTenantId = (req: Request) => {
   const tenantId = req.auth?.tenantId;
@@ -131,6 +135,22 @@ export const deleteTournamentHandler = async (req: Request, res: Response, next:
     const tenantId = getTenantId(req);
     const result = await deleteTournament(tenantId, id);
     return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const duplicateTournamentHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { id } = idSchema.parse(req.params);
+    const { name } = duplicateTournamentSchema.parse(req.body ?? {});
+    const tenantId = getTenantId(req);
+    const result = await duplicateTournament({ tenantId, id, name });
+    return res.status(201).json(ok(result));
   } catch (error) {
     return next(error);
   }

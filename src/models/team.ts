@@ -29,6 +29,11 @@ const teamSchema = new Schema(
       type: String,
       trim: true
     },
+    sortOrder: {
+      type: Number,
+      default: 0,
+      required: true
+    },
     sourceType: {
       type: String,
       enum: ['TOURNAMENT_TEAM'],
@@ -43,6 +48,7 @@ const teamSchema = new Schema(
 
 teamSchema.index({ tenantId: 1, tournamentId: 1 });
 teamSchema.index({ tenantId: 1, tournamentId: 1, name: 1 }, { unique: true });
+teamSchema.index({ tenantId: 1, tournamentId: 1, sortOrder: 1 });
 
 export type Team = InferSchemaType<typeof teamSchema>;
 

@@ -70,7 +70,8 @@ const resolveTieSchema = z.object({
 
 const generateFixturesSchema = z
   .object({
-    regenerate: z.coerce.boolean().optional()
+    regenerate: z.coerce.boolean().optional(),
+    orderedTeamIds: z.array(z.string().min(1)).optional()
   })
   .optional();
 
@@ -138,7 +139,8 @@ export const generateFixturesHandler = async (req: Request, res: Response, next:
     const input = generateFixturesSchema.parse(req.body);
     const tenantId = getTenantId(req);
     const result = await generateFixtures(tenantId, tournamentId, {
-      regenerate: input?.regenerate ?? false
+      regenerate: input?.regenerate ?? false,
+      orderedTeamIds: input?.orderedTeamIds
     });
     return res.status(201).json(ok(result));
   } catch (error) {

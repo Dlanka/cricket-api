@@ -7,6 +7,7 @@ import {
   deleteTeam,
   getTeamById,
   listTeamsByTournament,
+  reorderTeamsByTournament,
   updateTeam
 } from '../services/teamService';
 
@@ -47,6 +48,10 @@ const tournamentIdSchema = z.object({
   tournamentId: z.string().min(1)
 });
 
+const reorderTeamsSchema = z.object({
+  orderedTeamIds: z.array(z.string().min(1)).min(2)
+});
+
 const getTenantId = (req: Request) => {
   const tenantId = req.auth?.tenantId;
   if (!tenantId) {
@@ -73,6 +78,18 @@ export const listTeamsHandler = async (req: Request, res: Response, next: NextFu
     const tenantId = getTenantId(req);
     const teams = await listTeamsByTournament(tenantId, tournamentId);
     return res.status(200).json(ok(teams));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const reorderTeamsHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { tournamentId } = tournamentIdSchema.parse(req.params);
+    const { orderedTeamIds } = reorderTeamsSchema.parse(req.body);
+    const tenantId = getTenantId(req);
+    const result = await reorderTeamsByTournament(tenantId, tournamentId, orderedTeamIds);
+    return res.status(200).json(ok(result));
   } catch (error) {
     return next(error);
   }

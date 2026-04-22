@@ -42,6 +42,13 @@ export const createTeam = async (input: TeamCreateInput) => {
   ensureObjectId(input.tournamentId, 'Invalid tournament id.');
 
   await ensureTournament(input.tenantId, input.tournamentId);
+  const lastTeam = await TeamModel.findOne({
+    tenantId: input.tenantId,
+    tournamentId: input.tournamentId
+  })
+    .sort({ sortOrder: -1, createdAt: -1 })
+    .select({ sortOrder: 1 });
+  const nextSortOrder = (lastTeam?.sortOrder ?? -1) + 1;
 
   const team = await TeamModel.create({
     tenantId: input.tenantId,
@@ -49,7 +56,8 @@ export const createTeam = async (input: TeamCreateInput) => {
     name: input.name,
     shortName: input.shortName,
     contactPerson: input.contactPerson,
-    contactNumber: input.contactNumber
+    contactNumber: input.contactNumber,
+    sortOrder: nextSortOrder
   });
 
   return team;
@@ -61,7 +69,7 @@ export const listTeamsByTournament = async (tenantId: string, tournamentId: stri
 
   await ensureTournament(tenantId, tournamentId);
 
-  return scopedFind(TeamModel, tenantId, { tournamentId }).sort({ createdAt: -1 });
+  return scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 });
 };
 
 export const getTeamById = async (tenantId: string, id: string) => {
@@ -110,4 +118,58 @@ export const deleteTeam = async (tenantId: string, id: string) => {
   await TeamAccessLinkModel.deleteMany({ tenantId, teamId: id });
 
   return { id };
+};
+
+export const reorderTeamsByTournament = async (
+  tenantId: string,
+  tournamentId: string,
+  orderedTeamIds: string[]
+) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(tournamentId, 'Invalid tournament id.');
+  if (orderedTeamIds.some((id) => !isValidObjectId(id))) {
+    throw new AppError('Invalid team id in ordered list.', 400, 'validation.invalid_id');
+  }
+
+  const tournament = await ensureTournament(tenantId, tournamentId);
+  if (tournament.type !== 'KNOCKOUT' && tournament.type !== 'LEAGUE_KNOCKOUT') {
+    throw new AppError(
+      'Team reorder is allowed only for Knockout and League + Knockout tournaments.',
+      409,
+      'team.reorder_not_allowed'
+    );
+  }
+
+  const teams = await scopedFind(TeamModel, tenantId, { tournamentId }).select({ _id: 1 });
+  const uniqueOrderedTeamIds = [...new Set(orderedTeamIds)];
+  const teamIds = teams.map((team) => team._id.toString());
+
+  if (uniqueOrderedTeamIds.length !== teams.length) {
+    throw new AppError(
+      'Team order must include each team exactly once.',
+      400,
+      'team.invalid_order'
+    );
+  }
+
+  const idSet = new Set(teamIds);
+  const hasUnknown = uniqueOrderedTeamIds.some((id) => !idSet.has(id));
+  if (hasUnknown) {
+    throw new AppError(
+      'Team order contains unknown team ids.',
+      400,
+      'team.invalid_order'
+    );
+  }
+
+  await TeamModel.bulkWrite(
+    uniqueOrderedTeamIds.map((teamId, index) => ({
+      updateOne: {
+        filter: { tenantId, tournamentId, _id: teamId },
+        update: { $set: { sortOrder: index } }
+      }
+    }))
+  );
+
+  return { updated: uniqueOrderedTeamIds.length };
 };

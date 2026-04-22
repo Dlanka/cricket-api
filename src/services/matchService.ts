@@ -44,15 +44,6 @@ const ensureMatch = async (tenantId: string, matchId: string) => {
   return match;
 };
 
-const shuffle = <T>(items: T[]) => {
-  const list = [...items];
-  for (let i = list.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [list[i], list[j]] = [list[j], list[i]];
-  }
-  return list;
-};
-
 const generateRoundRobinRounds = (teamIds: string[]) => {
   const hasOddTeams = teamIds.length % 2 === 1;
   const slots = hasOddTeams ? [...teamIds, null] : [...teamIds];
@@ -223,7 +214,7 @@ export const getTournamentFixturesBracket = async (tenantId: string, tournamentI
 
   const tournament = await ensureTournament(tenantId, tournamentId);
   const [teams, matches] = await Promise.all([
-    scopedFind(TeamModel, tenantId, { tournamentId }).sort({ createdAt: 1 }),
+    scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 }),
     scopedFind(MatchModel, tenantId, { tournamentId }).sort({ createdAt: 1 })
   ]);
 
@@ -343,7 +334,7 @@ export const getTournamentFixturesView = async (tenantId: string, tournamentId: 
 
   const [tournament, teams, matches, bracket] = await Promise.all([
     ensureTournament(tenantId, tournamentId),
-    scopedFind(TeamModel, tenantId, { tournamentId }).sort({ createdAt: 1 }),
+    scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 }),
     scopedFind(MatchModel, tenantId, { tournamentId }).sort({ createdAt: 1 }),
     getTournamentFixturesBracket(tenantId, tournamentId)
   ]);
@@ -652,7 +643,7 @@ export const resolveMatchTie = async (input: ResolveMatchTieInput) => {
 export const generateFixtures = async (
   tenantId: string,
   tournamentId: string,
-  options?: { regenerate?: boolean }
+  options?: { regenerate?: boolean; orderedTeamIds?: string[] }
 ) => {
   ensureObjectId(tenantId, 'Invalid tenant id.');
   ensureObjectId(tournamentId, 'Invalid tournament id.');
@@ -704,7 +695,7 @@ export const generateFixtures = async (
     ]);
   }
 
-  const teams = await scopedFind(TeamModel, tenantId, { tournamentId }).sort({ createdAt: 1 });
+  const teams = await scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 });
 
   if (teams.length < 2) {
     throw new AppError('At least two teams are required to generate fixtures.', 400, 'match.insufficient_teams');
@@ -745,7 +736,33 @@ export const generateFixtures = async (
   }
 
   if (tournament.type === 'KNOCKOUT') {
-    const shuffled = shuffle(teams);
+    let orderedTeams = teams;
+
+    if (Array.isArray(options?.orderedTeamIds) && options.orderedTeamIds.length > 0) {
+      const normalizedOrder = options.orderedTeamIds.map((id) => id.toString());
+      const uniqueOrder = [...new Set(normalizedOrder)];
+      const teamsById = new Map(teams.map((team) => [team._id.toString(), team]));
+
+      if (uniqueOrder.length !== teams.length) {
+        throw new AppError(
+          'Knockout team order must include every team exactly once.',
+          400,
+          'match.invalid_team_order'
+        );
+      }
+
+      const hasUnknownTeam = uniqueOrder.some((teamId) => !teamsById.has(teamId));
+      if (hasUnknownTeam) {
+        throw new AppError(
+          'Knockout team order contains unknown team id.',
+          400,
+          'match.invalid_team_order'
+        );
+      }
+
+      orderedTeams = uniqueOrder.map((teamId) => teamsById.get(teamId)!);
+    }
+
     const matches: Array<{
       tenantId: string;
       tournamentId: string;
@@ -764,8 +781,8 @@ export const generateFixtures = async (
 
     let index = 0;
 
-    if (shuffled.length % 2 === 1) {
-      const byeTeam = shuffled[0];
+    if (orderedTeams.length % 2 === 1) {
+      const byeTeam = orderedTeams[0];
       matches.push({
         tenantId,
         tournamentId,
@@ -784,9 +801,9 @@ export const generateFixtures = async (
       index = 1;
     }
 
-    for (let i = index; i < shuffled.length; i += 2) {
-      const teamA = shuffled[i];
-      const teamB = shuffled[i + 1];
+    for (let i = index; i < orderedTeams.length; i += 2) {
+      const teamA = orderedTeams[i];
+      const teamB = orderedTeams[i + 1];
       if (!teamB) break;
       matches.push({
         tenantId,
