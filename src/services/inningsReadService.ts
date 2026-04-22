@@ -35,10 +35,7 @@ const getInningsOrThrow = async (tenantId: string, inningsId: string) => {
 const activeEventFilter = (tenantId: string, inningsId: string) => ({
   tenantId,
   inningsId,
-  $and: [
-    { $or: [{ isUndone: false }, { isUndone: { $exists: false } }] },
-    { $or: [{ undoneAt: null }, { undoneAt: { $exists: false } }] }
-  ]
+  isUndone: { $ne: true }
 });
 
 const deriveSummary = (event: {
@@ -224,8 +221,17 @@ export const getOversForInnings = async (tenantId: string, inningsId: string, li
 
   const fetchLimit = Math.min(limit, 50) * ballsPerOver * 4;
   const events = await ScoreEventModel.find(activeEventFilter(tenantId, inningsId))
+    .select({
+      seq: 1,
+      type: 1,
+      summaryDisplay: 1,
+      payload: 1,
+      isLegal: 1,
+      'afterSnapshot.innings.currentBowlerId': 1
+    })
     .sort({ seq: -1 })
-    .limit(fetchLimit);
+    .limit(fetchLimit)
+    .lean();
 
   let legalRemaining = innings.balls;
   const overMap = new Map<
@@ -280,8 +286,17 @@ export const getEventsForInnings = async (
   }
 
   const events = await ScoreEventModel.find(query)
+    .select({
+      seq: 1,
+      type: 1,
+      summaryDisplay: 1,
+      payload: 1,
+      isLegal: 1,
+      createdAt: 1
+    })
     .sort({ seq: -1 })
-    .limit(limit);
+    .limit(limit)
+    .lean();
 
   return {
     items: events.map((event) => ({
