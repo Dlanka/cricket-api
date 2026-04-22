@@ -342,16 +342,21 @@ const snapshotBowler = (entry: any) => ({
   noBalls: entry.noBalls
 });
 
-const captureSnapshot = async (
+const buildSnapshotFromState = (
   innings: any,
-  batterIds: string[],
-  bowlerStatsId?: string
-): Promise<Snapshot> => {
-  const uniqueIds = [...new Set(batterIds.filter(Boolean))];
-  const batters = uniqueIds.length ? await InningsBatterModel.find({ _id: { $in: uniqueIds } }) : [];
-  const bowler = bowlerStatsId ? await InningsBowlerModel.findById(bowlerStatsId) : null;
-
+  batters: any[],
+  bowler: any | null
+): Snapshot => {
   ensureCurrentOver(innings);
+  ensureInningsExtras(innings);
+
+  const uniqueBatters = [
+    ...new Map(
+      batters
+        .filter((entry) => entry && entry._id)
+        .map((entry) => [entry._id.toString(), entry])
+    ).values()
+  ];
 
   return {
     innings: {
@@ -377,7 +382,7 @@ const captureSnapshot = async (
         }))
       }
     },
-    batters: batters.map(snapshotBatter),
+    batters: uniqueBatters.map(snapshotBatter),
     bowler: bowler ? snapshotBowler(bowler) : null
   };
 };
@@ -897,9 +902,10 @@ const applyEvent = async (input: ScoreEventInput) => {
   }
 
   const involved = new Set([striker._id.toString(), nonStriker._id.toString()]);
-  const beforeSnapshot = await captureSnapshot(innings, [...involved], bowler._id.toString());
+  const beforeSnapshot = buildSnapshotFromState(innings, [striker, nonStriker], bowler);
 
   let createdBatterStatId: string | undefined;
+  let createdBatterDoc: any | undefined;
   let matchCompletedNow = false;
   let shouldSyncKnockout = false;
 
@@ -926,6 +932,7 @@ const applyEvent = async (input: ScoreEventInput) => {
       innings.nonStrikerId = newBatter._id;
     }
 
+    createdBatterDoc = newBatter;
     createdBatterStatId = newBatter._id.toString();
     involved.add(createdBatterStatId);
   }
@@ -1158,6 +1165,7 @@ const applyEvent = async (input: ScoreEventInput) => {
         innings.nonStrikerId = newBatter._id;
       }
 
+      createdBatterDoc = newBatter;
       createdBatterStatId = newBatter._id.toString();
       involved.add(createdBatterStatId);
     } else {
@@ -1384,7 +1392,11 @@ const applyEvent = async (input: ScoreEventInput) => {
     ]);
   }
 
-  const afterSnapshot = await captureSnapshot(innings, [...involved], bowler._id.toString());
+  const afterSnapshot = buildSnapshotFromState(
+    innings,
+    [striker, nonStriker, currentStriker, currentNonStriker, createdBatterDoc],
+    bowler
+  );
 
   const meta = buildEventMeta(input);
 
