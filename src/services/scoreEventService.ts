@@ -401,32 +401,33 @@ const restoreSnapshot = async (tenantId: string, innings: any, snapshot: Snapsho
     balls: snapshot.innings.currentOver.balls
   };
 
-  await Promise.all(
-    snapshot.batters.map((b) =>
-      InningsBatterModel.updateOne(
-        { _id: b.id, tenantId, inningsId: innings._id },
-        {
-          $set: {
-            tenantId,
-            inningsId: innings._id,
-            batterKey: { playerId: b.playerRef.playerId, name: b.playerRef.name },
-            playerRef: { playerId: b.playerRef.playerId, name: b.playerRef.name },
-            runs: b.runs,
-            balls: b.balls,
-            fours: b.fours,
-            sixes: b.sixes,
-            isOut: b.isOut,
-            outKind: b.outKind,
-            outFielderId: b.outFielderId,
-            outFielderName: b.outFielderName,
-            outBowlerId: b.outBowlerId,
-            outBowlerName: b.outBowlerName
-          }
-        },
-        { upsert: true }
-      )
-    )
-  );
+  if (snapshot.batters.length > 0) {
+    const batterOps = snapshot.batters.map((b) => ({
+        updateOne: {
+          filter: { _id: b.id, tenantId, inningsId: innings._id },
+          update: {
+            $set: {
+              tenantId,
+              inningsId: innings._id,
+              batterKey: { playerId: b.playerRef.playerId, name: b.playerRef.name },
+              playerRef: { playerId: b.playerRef.playerId, name: b.playerRef.name },
+              runs: b.runs,
+              balls: b.balls,
+              fours: b.fours,
+              sixes: b.sixes,
+              isOut: b.isOut,
+              outKind: b.outKind,
+              outFielderId: b.outFielderId,
+              outFielderName: b.outFielderName,
+              outBowlerId: b.outBowlerId,
+              outBowlerName: b.outBowlerName
+            }
+          },
+          upsert: true
+        }
+      })) as any;
+    await InningsBatterModel.bulkWrite(batterOps);
+  }
 
   if (snapshot.bowler) {
     await InningsBowlerModel.updateOne(
@@ -619,6 +620,11 @@ const createNextBatter = async (
 
 const applyUndo = async (input: ScoreEventInput) => {
   const startedAt = Date.now();
+  const phase = {
+    loadMs: 0,
+    restoreMs: 0,
+    saveMs: 0
+  };
   const match = await scopedFindOne(MatchModel, input.tenantId, { _id: input.matchId });
 
   if (!match) {
@@ -704,18 +710,16 @@ const applyUndo = async (input: ScoreEventInput) => {
 
   const before = target.beforeSnapshot as Snapshot;
   const after = target.afterSnapshot as Snapshot;
-
-  const undoBefore = await captureSnapshot(
-    context.innings,
-    after.batters.map((b) => b.id),
-    after.bowler?.id
-  );
+  phase.loadMs = Date.now() - startedAt;
 
   await restoreSnapshot(input.tenantId, context.innings, before);
 
   const createdBatterStatId = (target.payload as { createdBatterStatId?: string })?.createdBatterStatId;
   if (createdBatterStatId && !before.batters.some((b) => b.id === createdBatterStatId)) {
-    const created = await InningsBatterModel.findOne({ _id: createdBatterStatId, tenantId: input.tenantId });
+    const created = await InningsBatterModel.findOne({
+      _id: createdBatterStatId,
+      tenantId: input.tenantId
+    }).select({ runs: 1, balls: 1, fours: 1, sixes: 1, isOut: 1 });
 
     if (
       created &&
@@ -728,6 +732,7 @@ const applyUndo = async (input: ScoreEventInput) => {
       await created.deleteOne();
     }
   }
+  phase.restoreMs = Date.now() - startedAt - phase.loadMs;
 
   target.isUndone = true;
   target.undoneAt = new Date();
@@ -784,10 +789,13 @@ const applyUndo = async (input: ScoreEventInput) => {
       targetEventId: target._id.toString(),
       targetSeq: target.seq
     },
-    beforeSnapshot: undoBefore,
+    // For undo of latest event, current state should be target.afterSnapshot.
+    // Reusing avoids an additional read-heavy snapshot capture in hot path.
+    beforeSnapshot: after,
     afterSnapshot: before,
     createdByUserId: input.createdByUserId
   });
+  phase.saveMs = Date.now() - startedAt - phase.loadMs - phase.restoreMs;
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
   emitMatchScoreRefresh(input.tenantId, input.matchId);
@@ -796,7 +804,13 @@ const applyUndo = async (input: ScoreEventInput) => {
   const durationMs = Date.now() - startedAt;
   if (durationMs > 1200) {
     logger.warn(
-      { tenantId: input.tenantId, matchId: input.matchId, eventType: input.type, durationMs },
+      {
+        tenantId: input.tenantId,
+        matchId: input.matchId,
+        eventType: input.type,
+        durationMs,
+        phases: phase
+      },
       'Slow score-event processing'
     );
   }
