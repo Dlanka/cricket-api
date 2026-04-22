@@ -138,17 +138,13 @@ const ensureLiveContext = async (
     throw new AppError('Match has no active innings.', 409, 'innings.not_started');
   }
 
-  const [innings, tournament] = await Promise.all([
-    scopedFindOne(InningsModel, tenantId, {
-      _id: match.currentInningsId,
-      matchId,
-      status: allowCompletedInnings ? { $in: ['LIVE', 'COMPLETED'] } : 'LIVE'
-    }),
-    scopedFindOne(TournamentModel, tenantId, { _id: match.tournamentId })
-  ]);
+  const innings = await scopedFindOne(InningsModel, tenantId, {
+    _id: match.currentInningsId,
+    matchId,
+    status: allowCompletedInnings ? { $in: ['LIVE', 'COMPLETED'] } : 'LIVE'
+  });
 
   if (!innings) throw new AppError('Innings not found.', 404, 'innings.not_found');
-  if (!tournament) throw new AppError('Tournament not found.', 404, 'tournament.not_found');
 
   ensureCurrentOver(innings);
 
@@ -204,9 +200,8 @@ const ensureLiveContext = async (
   return {
     match,
     innings,
-    tournament,
     // Match-level/innings-level override must drive legal-ball and over-end logic.
-    ballsPerOver: innings.ballsPerOver ?? tournament.ballsPerOver ?? 6,
+    ballsPerOver: innings.ballsPerOver ?? match.ballsPerOver ?? 6,
     battingIds,
     bowlingIds
   };
@@ -947,17 +942,11 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   const innings = context.innings;
   ensureInningsExtras(innings);
-  const striker = await resolveBatter(input.tenantId, innings._id.toString(), innings.strikerId.toString());
-  const nonStriker = await resolveBatter(
-    input.tenantId,
-    innings._id.toString(),
-    innings.nonStrikerId.toString()
-  );
-  const bowler = await resolveBowler(
-    input.tenantId,
-    innings._id.toString(),
-    innings.currentBowlerId.toString()
-  );
+  const [striker, nonStriker, bowler] = await Promise.all([
+    resolveBatter(input.tenantId, innings._id.toString(), innings.strikerId.toString()),
+    resolveBatter(input.tenantId, innings._id.toString(), innings.nonStrikerId.toString()),
+    resolveBowler(input.tenantId, innings._id.toString(), innings.currentBowlerId.toString())
+  ]);
   const knownBatterDocs = new Map<string, any>();
   const registerBatter = (entry: any | undefined) => {
     if (!entry || !entry._id) return;
@@ -1307,7 +1296,7 @@ const applyEvent = async (input: ScoreEventInput) => {
       throw new AppError('First innings not found.', 404, 'innings.not_found');
     }
 
-    const maxLegalBalls = (innings.oversPerInnings ?? context.tournament.oversPerInnings) * context.ballsPerOver;
+    const maxLegalBalls = (innings.oversPerInnings ?? context.match.oversPerInnings ?? 0) * context.ballsPerOver;
     const evaluation = evaluateSecondInningsResult({
       match: context.match,
       innings1,
