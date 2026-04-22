@@ -1328,19 +1328,36 @@ const applyEvent = async (input: ScoreEventInput) => {
   const currentNonStriker = await resolveCurrentBatterDoc(innings.nonStrikerId.toString());
 
   if (innings.inningsNumber === 2) {
-    const innings1 = await scopedFindOne(InningsModel, input.tenantId, {
-      matchId: input.matchId,
-      inningsNumber: 1
-    });
+    let firstInningsRuns =
+      typeof context.match.firstInningsRuns === 'number'
+        ? context.match.firstInningsRuns
+        : null;
+    let firstInningsBattingTeamId = innings.bowlingTeamId;
 
-    if (!innings1) {
-      throw new AppError('First innings not found.', 404, 'innings.not_found');
+    if (firstInningsRuns === null) {
+      const innings1 = await scopedFindOne(InningsModel, input.tenantId, {
+        matchId: input.matchId,
+        inningsNumber: 1
+      }).select({ runs: 1, battingTeamId: 1 });
+
+      if (!innings1) {
+        throw new AppError('First innings not found.', 404, 'innings.not_found');
+      }
+
+      firstInningsRuns = innings1.runs;
+      firstInningsBattingTeamId = innings1.battingTeamId;
+      context.match.firstInningsRuns = innings1.runs;
     }
 
     const maxLegalBalls = (innings.oversPerInnings ?? context.match.oversPerInnings ?? 0) * context.ballsPerOver;
     const evaluation = evaluateSecondInningsResult({
       match: context.match,
-      innings1,
+      innings1: {
+        runs: firstInningsRuns,
+        wickets: 0,
+        balls: 0,
+        battingTeamId: firstInningsBattingTeamId
+      },
       innings2: innings,
       maxLegalBalls
     });
@@ -1348,7 +1365,7 @@ const applyEvent = async (input: ScoreEventInput) => {
     if (evaluation.isMatchCompleted && evaluation.result) {
       innings.status = 'COMPLETED';
       context.match.status = 'COMPLETED';
-      context.match.firstInningsRuns = innings1.runs;
+      context.match.firstInningsRuns = firstInningsRuns;
       context.match.secondInningsTarget = evaluation.result.targetRuns;
       context.match.result = {
         isNoResult: false,
