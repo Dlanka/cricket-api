@@ -14,6 +14,7 @@ import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
 import { evaluateSecondInningsResult } from './utils/evaluateSecondInningsResult';
 import { invalidateCachedMatchScore } from './utils/matchScoreCache';
 import { emitMatchScoreRefresh, emitMatchScoreUpdate } from './utils/matchScoreRealtime';
+import { invalidateInningsReadCache, invalidateMatchReadCache } from './utils/scoringReadCache';
 import { syncKnockoutProgression, syncLeagueCompletionStatus } from './tournamentService';
 import { applyStrikeRotationForDelivery } from './utils/strikeRotation';
 import { getMatchScore } from './matchService';
@@ -840,6 +841,8 @@ const applyUndo = async (input: ScoreEventInput) => {
   phase.saveMs = Date.now() - startedAt - phase.loadMs - phase.restoreMs;
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  invalidateMatchReadCache(input.tenantId, input.matchId);
+  invalidateInningsReadCache(input.tenantId, context.innings._id.toString());
   emitMatchScoreRefresh(input.tenantId, input.matchId);
   emitLiveScoreUpdateAsync(input.tenantId, input.matchId);
 
@@ -1533,6 +1536,8 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   const postStartedAt = Date.now();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  invalidateMatchReadCache(input.tenantId, input.matchId);
+  invalidateInningsReadCache(input.tenantId, innings._id.toString());
   emitMatchScoreRefresh(input.tenantId, input.matchId);
   emitLiveScoreUpdateAsync(input.tenantId, input.matchId);
   phase.postMs = Date.now() - postStartedAt;

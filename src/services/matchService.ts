@@ -16,6 +16,7 @@ import {
   setCachedMatchScore
 } from './utils/matchScoreCache';
 import { emitMatchScoreRefresh } from './utils/matchScoreRealtime';
+import { getCachedMatchRead, setCachedMatchRead } from './utils/scoringReadCache';
 
 const ensureObjectId = (id: string, message: string) => {
   if (!isValidObjectId(id)) {
@@ -870,6 +871,15 @@ export type StartSuperOverInput = {
 export const getAvailableNextBatters = async (tenantId: string, matchId: string) => {
   ensureObjectId(tenantId, 'Invalid tenant id.');
   ensureObjectId(matchId, 'Invalid match id.');
+  const cacheSuffix = 'available-next-batters';
+  const cached = getCachedMatchRead<{
+    strikerId: string;
+    nonStrikerId: string;
+    items: Array<{ playerId: string; fullName: string }>;
+  }>(tenantId, matchId, cacheSuffix);
+  if (cached) {
+    return cached;
+  }
 
   const match = await ensureMatch(tenantId, matchId);
 
@@ -891,11 +901,13 @@ export const getAvailableNextBatters = async (tenantId: string, matchId: string)
   }
 
   if (innings.status !== 'LIVE') {
-    return {
+    const result = {
       strikerId: innings.strikerId.toString(),
       nonStrikerId: innings.nonStrikerId.toString(),
       items: []
     };
+    setCachedMatchRead(tenantId, matchId, cacheSuffix, result);
+    return result;
   }
 
   const roster = await scopedFind(MatchPlayerModel, tenantId, {
@@ -970,11 +982,13 @@ export const getAvailableNextBatters = async (tenantId: string, matchId: string)
       fullName: playerMap.get(playerId) ?? 'Unknown Player'
     }));
 
-  return {
+  const result = {
     strikerId: innings.strikerId.toString(),
     nonStrikerId: innings.nonStrikerId.toString(),
     items
   };
+  setCachedMatchRead(tenantId, matchId, cacheSuffix, result);
+  return result;
 };
 
 export const startMatch = async (input: StartMatchInput) => {

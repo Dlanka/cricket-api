@@ -6,6 +6,59 @@ import { PlayerModel } from '../models/player';
 import { ScoreEventModel } from '../models/scoreEvent';
 import { AppError } from '../utils/appError';
 import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
+import { getCachedInningsRead, setCachedInningsRead } from './utils/scoringReadCache';
+
+type BattersReadResponse = {
+  items: Array<{
+    batterId: string;
+    name: string;
+    runs: number;
+    balls: number;
+    fours: number;
+    sixes: number;
+    isOut: boolean;
+    outKind: string | null;
+    dismissalText: string | null;
+    sr: number;
+  }>;
+};
+
+type BowlersReadResponse = {
+  items: Array<{
+    bowlerId: string;
+    name: string;
+    balls: number;
+    overs: string;
+    runsConceded: number;
+    wickets: number;
+    maidens: number;
+    wides: number;
+    noBalls: number;
+    er: number;
+  }>;
+};
+
+type OversReadResponse = {
+  items: Array<{
+    overNumber: number;
+    bowlerId: string | null;
+    balls: Array<{ seq: number; display: string; isLegal: boolean }>;
+    runsThisOver: number;
+  }>;
+  nextCursor: null;
+};
+
+type EventsReadResponse = {
+  items: Array<{
+    id: string;
+    seq: number;
+    type: string;
+    summary: string;
+    isLegal: boolean;
+    createdAt: Date;
+  }>;
+  nextCursor: number | null;
+};
 
 const ensureObjectId = (id: string, message: string) => {
   if (!isValidObjectId(id)) {
@@ -144,12 +197,20 @@ const getSnapshotBowlerId = (event: { afterSnapshot?: unknown }) => {
   return typeof bowlerId === 'string' ? bowlerId : null;
 };
 
-export const getBattersForInnings = async (tenantId: string, inningsId: string) => {
+export const getBattersForInnings = async (
+  tenantId: string,
+  inningsId: string
+): Promise<BattersReadResponse> => {
+  const cached = getCachedInningsRead<BattersReadResponse>(tenantId, inningsId, 'batters');
+  if (cached) {
+    return cached;
+  }
+
   await getInningsOrThrow(tenantId, inningsId);
 
   const items = await scopedFind(InningsBatterModel, tenantId, { inningsId }).sort({ position: 1, createdAt: 1 });
 
-  return {
+  const result = {
     items: items.map((entry) => ({
       batterId: entry._id.toString(),
       name: entry.playerRef?.name ?? entry.batterKey?.name ?? 'Unknown',
@@ -174,9 +235,19 @@ export const getBattersForInnings = async (tenantId: string, inningsId: string) 
       sr: entry.balls > 0 ? Number(((entry.runs / entry.balls) * 100).toFixed(2)) : 0
     }))
   };
+  setCachedInningsRead(tenantId, inningsId, 'batters', result);
+  return result;
 };
 
-export const getBowlersForInnings = async (tenantId: string, inningsId: string) => {
+export const getBowlersForInnings = async (
+  tenantId: string,
+  inningsId: string
+): Promise<BowlersReadResponse> => {
+  const cached = getCachedInningsRead<BowlersReadResponse>(tenantId, inningsId, 'bowlers');
+  if (cached) {
+    return cached;
+  }
+
   const innings = await getInningsOrThrow(tenantId, inningsId);
   const ballsPerOver = innings.ballsPerOver ?? 6;
 
@@ -195,7 +266,7 @@ export const getBowlersForInnings = async (tenantId: string, inningsId: string) 
     });
   }
 
-  return {
+  const result = {
     items: bowlers.map((entry) => {
       const oversNumber = entry.balls / ballsPerOver;
 
@@ -213,9 +284,21 @@ export const getBowlersForInnings = async (tenantId: string, inningsId: string) 
       };
     })
   };
+  setCachedInningsRead(tenantId, inningsId, 'bowlers', result);
+  return result;
 };
 
-export const getOversForInnings = async (tenantId: string, inningsId: string, limit: number) => {
+export const getOversForInnings = async (
+  tenantId: string,
+  inningsId: string,
+  limit: number
+): Promise<OversReadResponse> => {
+  const cacheSuffix = `overs:${limit}`;
+  const cached = getCachedInningsRead<OversReadResponse>(tenantId, inningsId, cacheSuffix);
+  if (cached) {
+    return cached;
+  }
+
   const innings = await getInningsOrThrow(tenantId, inningsId);
   const ballsPerOver = innings.ballsPerOver ?? 6;
 
@@ -265,10 +348,12 @@ export const getOversForInnings = async (tenantId: string, inningsId: string, li
 
   const items = [...overMap.values()].sort((a, b) => b.overNumber - a.overNumber).slice(0, limit);
 
-  return {
+  const result = {
     items,
     nextCursor: null
   };
+  setCachedInningsRead(tenantId, inningsId, cacheSuffix, result);
+  return result;
 };
 
 export const getEventsForInnings = async (
@@ -276,7 +361,13 @@ export const getEventsForInnings = async (
   inningsId: string,
   cursor: number | null,
   limit: number
-) => {
+): Promise<EventsReadResponse> => {
+  const cacheSuffix = `events:${limit}:${cursor ?? 'none'}`;
+  const cached = getCachedInningsRead<EventsReadResponse>(tenantId, inningsId, cacheSuffix);
+  if (cached) {
+    return cached;
+  }
+
   await getInningsOrThrow(tenantId, inningsId);
 
   const query: Record<string, unknown> = activeEventFilter(tenantId, inningsId);
@@ -298,7 +389,7 @@ export const getEventsForInnings = async (
     .limit(limit)
     .lean();
 
-  return {
+  const result = {
     items: events.map((event) => ({
       id: event._id.toString(),
       seq: event.seq,
@@ -309,4 +400,6 @@ export const getEventsForInnings = async (
     })),
     nextCursor: events.length === limit ? events[events.length - 1].seq : null
   };
+  setCachedInningsRead(tenantId, inningsId, cacheSuffix, result);
+  return result;
 };
