@@ -15,6 +15,7 @@ import {
   invalidateCachedMatchScore,
   setCachedMatchScore
 } from './utils/matchScoreCache';
+import { emitMatchScoreRefresh } from './utils/matchScoreRealtime';
 
 const ensureObjectId = (id: string, message: string) => {
   if (!isValidObjectId(id)) {
@@ -565,6 +566,7 @@ export const updateMatchConfig = async (input: UpdateMatchConfigInput) => {
 
   await match.save();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -627,6 +629,7 @@ export const resolveMatchTie = async (input: ResolveMatchTieInput) => {
   }
   await match.save();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   const progression = await syncKnockoutProgression(
     input.tenantId,
@@ -1078,6 +1081,7 @@ export const startMatch = async (input: StartMatchInput) => {
     await match.save();
   }
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -1207,6 +1211,7 @@ export const changeCurrentBowler = async (input: ChangeCurrentBowlerInput) => {
   innings.currentBowlerId = input.bowlerId as unknown as typeof innings.currentBowlerId;
   await innings.save();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -1337,6 +1342,7 @@ export const startSecondInnings = async (input: StartSecondInningsInput) => {
   match.currentInningsId = innings._id;
   await match.save();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),
@@ -1467,6 +1473,7 @@ export const startSuperOver = async (input: StartSuperOverInput) => {
   match.currentInningsId = superOverInnings1._id;
   await match.save();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   return {
     matchId: match._id.toString(),

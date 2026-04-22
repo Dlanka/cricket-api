@@ -1,13 +1,18 @@
-﻿import { app } from './app';
+import { createServer } from 'http';
+import { app } from './app';
 import { connectToDatabase } from './db/mongo';
 import { env } from './config/env';
 import { logger } from './config/logger';
+import { initMatchScoreRealtime } from './services/utils/matchScoreRealtime';
 
 const startServer = async () => {
   try {
     await connectToDatabase();
 
-    app.listen(env.PORT, () => {
+    const httpServer = createServer(app);
+    initMatchScoreRealtime(httpServer);
+
+    httpServer.listen(env.PORT, () => {
       logger.info({ port: env.PORT }, 'API server listening');
     });
   } catch (error) {
@@ -17,3 +22,4 @@ const startServer = async () => {
 };
 
 startServer();
+

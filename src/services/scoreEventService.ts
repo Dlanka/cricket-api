@@ -12,8 +12,10 @@ import { AppError } from '../utils/appError';
 import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
 import { evaluateSecondInningsResult } from './utils/evaluateSecondInningsResult';
 import { invalidateCachedMatchScore } from './utils/matchScoreCache';
+import { emitMatchScoreRefresh, emitMatchScoreUpdate } from './utils/matchScoreRealtime';
 import { syncKnockoutProgression, syncLeagueCompletionStatus } from './tournamentService';
 import { applyStrikeRotationForDelivery } from './utils/strikeRotation';
+import { getMatchScore } from './matchService';
 
 type ScoreEventInput = {
   tenantId: string;
@@ -877,6 +879,9 @@ const applyUndo = async (input: ScoreEventInput) => {
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
   const score = await getScoreboard(context);
+  const liveScore = await getMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreUpdate(input.tenantId, input.matchId, liveScore);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   return {
     ...score,
@@ -1449,6 +1454,9 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
   const score = await getScoreboard(context);
+  const liveScore = await getMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreUpdate(input.tenantId, input.matchId, liveScore);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
 
   return {
     ...score,
