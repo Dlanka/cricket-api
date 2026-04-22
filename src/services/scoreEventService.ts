@@ -8,6 +8,7 @@ import { MatchPlayerModel } from '../models/matchPlayer';
 import { PlayerModel } from '../models/player';
 import { ScoreEventModel } from '../models/scoreEvent';
 import { TournamentModel } from '../models/tournament';
+import { logger } from '../config/logger';
 import { AppError } from '../utils/appError';
 import { scopedFind, scopedFindOne } from '../utils/scopedQuery';
 import { evaluateSecondInningsResult } from './utils/evaluateSecondInningsResult';
@@ -707,6 +708,7 @@ const createNextBatter = async (
 };
 
 const applyUndo = async (input: ScoreEventInput) => {
+  const startedAt = Date.now();
   const match = await scopedFindOne(MatchModel, input.tenantId, { _id: input.matchId });
 
   if (!match) {
@@ -879,9 +881,16 @@ const applyUndo = async (input: ScoreEventInput) => {
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
   const score = await getScoreboard(context);
-  const liveScore = await getMatchScore(input.tenantId, input.matchId);
-  emitMatchScoreUpdate(input.tenantId, input.matchId, liveScore);
   emitMatchScoreRefresh(input.tenantId, input.matchId);
+  emitLiveScoreUpdateAsync(input.tenantId, input.matchId);
+
+  const durationMs = Date.now() - startedAt;
+  if (durationMs > 1200) {
+    logger.warn(
+      { tenantId: input.tenantId, matchId: input.matchId, eventType: input.type, durationMs },
+      'Slow score-event processing'
+    );
+  }
 
   return {
     ...score,
@@ -921,7 +930,22 @@ const validateWicketExtraCombination = (wicketType: string, extraType: string) =
   }
 };
 
+const emitLiveScoreUpdateAsync = (tenantId: string, matchId: string) => {
+  void (async () => {
+    try {
+      const liveScore = await getMatchScore(tenantId, matchId);
+      emitMatchScoreUpdate(tenantId, matchId, liveScore);
+    } catch (error) {
+      logger.warn(
+        { err: error, tenantId, matchId },
+        'Unable to emit async score:update payload after score-event'
+      );
+    }
+  })();
+};
+
 const applyEvent = async (input: ScoreEventInput) => {
+  const startedAt = Date.now();
   const context = await ensureLiveContext(input.tenantId, input.matchId);
 
   const innings = context.innings;
@@ -1454,9 +1478,16 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   invalidateCachedMatchScore(input.tenantId, input.matchId);
   const score = await getScoreboard(context);
-  const liveScore = await getMatchScore(input.tenantId, input.matchId);
-  emitMatchScoreUpdate(input.tenantId, input.matchId, liveScore);
   emitMatchScoreRefresh(input.tenantId, input.matchId);
+  emitLiveScoreUpdateAsync(input.tenantId, input.matchId);
+
+  const durationMs = Date.now() - startedAt;
+  if (durationMs > 1200) {
+    logger.warn(
+      { tenantId: input.tenantId, matchId: input.matchId, eventType: input.type, durationMs },
+      'Slow score-event processing'
+    );
+  }
 
   return {
     ...score,
