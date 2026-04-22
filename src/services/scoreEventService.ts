@@ -262,6 +262,42 @@ const resolveBowler = async (tenantId: string, inningsId: string, playerId: stri
   return bowler;
 };
 
+const resolveOnFieldParticipants = async (
+  tenantId: string,
+  inningsId: string,
+  strikerId: string,
+  nonStrikerId: string,
+  bowlerId: string
+) => {
+  const batterIds = [strikerId, nonStrikerId];
+  const [batterCandidates, bowler] = await Promise.all([
+    InningsBatterModel.find({
+      tenantId,
+      inningsId,
+      $or: [
+        { _id: { $in: batterIds } },
+        { 'playerRef.playerId': { $in: batterIds } },
+        { 'batterKey.playerId': { $in: batterIds } }
+      ]
+    }),
+    resolveBowler(tenantId, inningsId, bowlerId)
+  ]);
+
+  const findBatter = (onFieldId: string) =>
+    batterCandidates.find(
+      (entry) =>
+        entry._id.toString() === onFieldId ||
+        entry.playerRef?.playerId?.toString() === onFieldId ||
+        entry.batterKey?.playerId?.toString() === onFieldId
+    );
+
+  const striker = findBatter(strikerId) ?? (await resolveBatter(tenantId, inningsId, strikerId));
+  const nonStriker =
+    findBatter(nonStrikerId) ?? (await resolveBatter(tenantId, inningsId, nonStrikerId));
+
+  return { striker, nonStriker, bowler };
+};
+
 const pushBall = (
   innings: any,
   seq: number,
@@ -942,11 +978,13 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   const innings = context.innings;
   ensureInningsExtras(innings);
-  const [striker, nonStriker, bowler] = await Promise.all([
-    resolveBatter(input.tenantId, innings._id.toString(), innings.strikerId.toString()),
-    resolveBatter(input.tenantId, innings._id.toString(), innings.nonStrikerId.toString()),
-    resolveBowler(input.tenantId, innings._id.toString(), innings.currentBowlerId.toString())
-  ]);
+  const { striker, nonStriker, bowler } = await resolveOnFieldParticipants(
+    input.tenantId,
+    innings._id.toString(),
+    innings.strikerId.toString(),
+    innings.nonStrikerId.toString(),
+    innings.currentBowlerId.toString()
+  );
   const knownBatterDocs = new Map<string, any>();
   const registerBatter = (entry: any | undefined) => {
     if (!entry || !entry._id) return;
@@ -1439,12 +1477,19 @@ const applyEvent = async (input: ScoreEventInput) => {
 
   innings.eventSeq += 1;
   innings.lastSeq = innings.eventSeq;
-  const saves: Array<Promise<unknown>> = [
-    innings.save(),
-    striker.save(),
-    nonStriker.save(),
-    bowler.save()
-  ];
+  const saves: Array<Promise<unknown>> = [innings.save()];
+  const maybeSaveDoc = (doc: { isModified?: () => boolean; save: () => Promise<unknown> }) => {
+    if (typeof doc.isModified === 'function') {
+      if (doc.isModified()) {
+        saves.push(doc.save());
+      }
+      return;
+    }
+    saves.push(doc.save());
+  };
+  maybeSaveDoc(striker);
+  maybeSaveDoc(nonStriker);
+  maybeSaveDoc(bowler);
   if (typeof (context.match as { isModified?: () => boolean }).isModified === 'function' && context.match.isModified()) {
     saves.push(context.match.save());
   }
