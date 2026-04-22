@@ -128,7 +128,8 @@ const isKnockoutStage = (stage?: string | null) =>
 const ensureLiveContext = async (
   tenantId: string,
   matchId: string,
-  allowCompletedInnings = false
+  allowCompletedInnings = false,
+  includeRosterValidation = true
 ) => {
   const match = await scopedFindOne(MatchModel, tenantId, { _id: matchId });
   if (!match) throw new AppError('Match not found.', 404, 'match.not_found');
@@ -151,48 +152,53 @@ const ensureLiveContext = async (
 
   ensureCurrentOver(innings);
 
-  const [battingRoster, bowlingRoster] = await Promise.all([
-    scopedFind(MatchPlayerModel, tenantId, {
-      matchId,
-      teamId: innings.battingTeamId,
-      isPlaying: true
-    }),
-    scopedFind(MatchPlayerModel, tenantId, {
-      matchId,
-      teamId: innings.bowlingTeamId,
-      isPlaying: true
-    })
-  ]);
+  let battingIds = new Set<string>();
+  let bowlingIds = new Set<string>();
 
-  if (battingRoster.length === 0 || bowlingRoster.length === 0) {
-    throw new AppError('Roster must exist for both teams.', 400, 'match.roster_missing');
-  }
+  if (includeRosterValidation) {
+    const [battingRoster, bowlingRoster] = await Promise.all([
+      scopedFind(MatchPlayerModel, tenantId, {
+        matchId,
+        teamId: innings.battingTeamId,
+        isPlaying: true
+      }),
+      scopedFind(MatchPlayerModel, tenantId, {
+        matchId,
+        teamId: innings.bowlingTeamId,
+        isPlaying: true
+      })
+    ]);
 
-  const battingIds = new Set(battingRoster.map((r) => r.playerId.toString()));
-  const bowlingIds = new Set(bowlingRoster.map((r) => r.playerId.toString()));
-
-  const ensureOnFieldBatter = async (onFieldId: string) => {
-    if (battingIds.has(onFieldId)) {
-      return;
+    if (battingRoster.length === 0 || bowlingRoster.length === 0) {
+      throw new AppError('Roster must exist for both teams.', 400, 'match.roster_missing');
     }
 
-    const batter = await InningsBatterModel.findOne({
-      tenantId,
-      inningsId: innings._id,
-      $or: [{ _id: onFieldId }, { 'playerRef.playerId': onFieldId }, { 'batterKey.playerId': onFieldId }]
-    });
-    if (!batter) {
-      throw new AppError('On-field batter must be in playing XI.', 400, 'score.batter_invalid');
+    battingIds = new Set(battingRoster.map((r) => r.playerId.toString()));
+    bowlingIds = new Set(bowlingRoster.map((r) => r.playerId.toString()));
+
+    const ensureOnFieldBatter = async (onFieldId: string) => {
+      if (battingIds.has(onFieldId)) {
+        return;
+      }
+
+      const batter = await InningsBatterModel.findOne({
+        tenantId,
+        inningsId: innings._id,
+        $or: [{ _id: onFieldId }, { 'playerRef.playerId': onFieldId }, { 'batterKey.playerId': onFieldId }]
+      });
+      if (!batter) {
+        throw new AppError('On-field batter must be in playing XI.', 400, 'score.batter_invalid');
+      }
+    };
+
+    await Promise.all([
+      ensureOnFieldBatter(innings.strikerId.toString()),
+      ensureOnFieldBatter(innings.nonStrikerId.toString())
+    ]);
+
+    if (!bowlingIds.has(innings.currentBowlerId.toString())) {
+      throw new AppError('Current bowler must be in playing XI.', 400, 'score.bowler_invalid');
     }
-  };
-
-  await Promise.all([
-    ensureOnFieldBatter(innings.strikerId.toString()),
-    ensureOnFieldBatter(innings.nonStrikerId.toString())
-  ]);
-
-  if (!bowlingIds.has(innings.currentBowlerId.toString())) {
-    throw new AppError('Current bowler must be in playing XI.', 400, 'score.bowler_invalid');
   }
 
   return {
@@ -877,7 +883,37 @@ const emitLiveScoreUpdateAsync = (tenantId: string, matchId: string) => {
 
 const applyEvent = async (input: ScoreEventInput) => {
   const startedAt = Date.now();
-  const context = await ensureLiveContext(input.tenantId, input.matchId);
+  const context = await ensureLiveContext(input.tenantId, input.matchId, false, false);
+  let rosterIds: { battingIds: Set<string>; bowlingIds: Set<string> } | null = null;
+  const ensureRosterIds = async () => {
+    if (rosterIds) {
+      return rosterIds;
+    }
+
+    const [battingRoster, bowlingRoster] = await Promise.all([
+      scopedFind(MatchPlayerModel, input.tenantId, {
+        matchId: input.matchId,
+        teamId: context.innings.battingTeamId,
+        isPlaying: true
+      }).select({ playerId: 1 }),
+      scopedFind(MatchPlayerModel, input.tenantId, {
+        matchId: input.matchId,
+        teamId: context.innings.bowlingTeamId,
+        isPlaying: true
+      }).select({ playerId: 1 })
+    ]);
+
+    if (battingRoster.length === 0 || bowlingRoster.length === 0) {
+      throw new AppError('Roster must exist for both teams.', 400, 'match.roster_missing');
+    }
+
+    rosterIds = {
+      battingIds: new Set(battingRoster.map((entry) => entry.playerId.toString())),
+      bowlingIds: new Set(bowlingRoster.map((entry) => entry.playerId.toString()))
+    };
+
+    return rosterIds;
+  };
 
   const innings = context.innings;
   ensureInningsExtras(innings);
@@ -914,10 +950,11 @@ const applyEvent = async (input: ScoreEventInput) => {
   }
 
   if (input.type === 'retire') {
+    const { battingIds } = await ensureRosterIds();
     const newBatter = await createNextBatter(
       input.tenantId,
       innings._id.toString(),
-      context.battingIds,
+      battingIds,
       input.newBatterId,
       input.newBatterName
     );
@@ -1059,7 +1096,8 @@ const applyEvent = async (input: ScoreEventInput) => {
     const nextWickets = innings.wickets + 1;
     const isSuperOverInnings =
       context.match.phase === 'SUPER_OVER' && (innings.inningsNumber === 3 || innings.inningsNumber === 4);
-    const maxWickets = isSuperOverInnings ? 2 : Math.max(0, context.battingIds.size - 1);
+    const { battingIds, bowlingIds } = await ensureRosterIds();
+    const maxWickets = isSuperOverInnings ? 2 : Math.max(0, battingIds.size - 1);
     const inningsEndsOnWicket = maxWickets > 0 && nextWickets >= maxWickets;
     const isIllegalWicketDelivery = wicketExtraType === 'wide' || wicketExtraType === 'noBall';
     const penaltyRuns = wicketExtraType === 'wide' || wicketExtraType === 'noBall' ? 1 : 0;
@@ -1078,7 +1116,7 @@ const applyEvent = async (input: ScoreEventInput) => {
       if (!fielderId) {
         throw new AppError('Fielder is required for this wicket type.', 400, 'score.fielder_required');
       }
-      if (!context.bowlingIds.has(fielderId)) {
+      if (!bowlingIds.has(fielderId)) {
         throw new AppError('Fielder must be in bowling playing XI.', 400, 'score.fielder_invalid');
       }
     }
@@ -1145,7 +1183,7 @@ const applyEvent = async (input: ScoreEventInput) => {
       const newBatter = await createNextBatter(
         input.tenantId,
         innings._id.toString(),
-        context.battingIds,
+        battingIds,
         input.newBatterId,
         input.newBatterName
       );
