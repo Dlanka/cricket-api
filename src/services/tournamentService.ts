@@ -12,13 +12,15 @@ import { TournamentModel } from '../models/tournament';
 import { AppError } from '../utils/appError';
 import { scopedDeleteOne, scopedFind, scopedFindOne } from '../utils/scopedQuery';
 
+type TournamentType = 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT' | 'SERIES';
+
 export type TournamentCreateInput = {
   tenantId: string;
   name: string;
   location?: string;
   startDate?: Date;
   endDate?: Date;
-  type: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT';
+  type: TournamentType;
   oversPerInnings: number;
   ballsPerOver?: number;
   status?: 'DRAFT' | 'ACTIVE' | 'COMPLETED';
@@ -31,6 +33,10 @@ export type TournamentCreateInput = {
     };
     qualificationCount?: number;
     seeding?: 'STANDARD';
+    series?: {
+      totalMatches?: number;
+      winsToClinch?: number;
+    };
   };
   stageStatus?: {
     league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -43,7 +49,7 @@ export type TournamentUpdateInput = {
   location?: string | null;
   startDate?: Date | null;
   endDate?: Date | null;
-  type?: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT';
+  type?: TournamentType;
   oversPerInnings?: number;
   ballsPerOver?: number;
   status?: 'DRAFT' | 'ACTIVE' | 'COMPLETED';
@@ -56,6 +62,10 @@ export type TournamentUpdateInput = {
     };
     qualificationCount?: number;
     seeding?: 'STANDARD';
+    series?: {
+      totalMatches?: number;
+      winsToClinch?: number;
+    };
   };
   stageStatus?: {
     league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -182,10 +192,66 @@ const getPointsRules = (
   loss: tournament.rules?.points?.loss ?? 0
 });
 
+const getSeriesRules = (tournament: {
+  rules?: {
+    series?: {
+      totalMatches?: number | null;
+      winsToClinch?: number | null;
+    } | null;
+  };
+}) => ({
+  totalMatches: tournament.rules?.series?.totalMatches ?? 3,
+  winsToClinch: tournament.rules?.series?.winsToClinch ?? 2
+});
+
 const validateTournamentConfig = (
-  type: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT',
-  qualificationCount?: number
+  type: TournamentType,
+  rules?: {
+    qualificationCount?: number;
+    series?: {
+      totalMatches?: number | null;
+      winsToClinch?: number | null;
+    } | null;
+  }
 ) => {
+  const qualificationCount = rules?.qualificationCount;
+  const seriesRules = rules?.series;
+
+  if (type === 'SERIES') {
+    if (qualificationCount !== undefined) {
+      throw new AppError(
+        'qualificationCount is not supported for SERIES tournaments.',
+        400,
+        'tournament.invalid_rules'
+      );
+    }
+
+    const totalMatches = seriesRules?.totalMatches ?? 3;
+    const winsToClinch = seriesRules?.winsToClinch ?? 2;
+    if (totalMatches < 1) {
+      throw new AppError('series.totalMatches must be at least 1.', 400, 'tournament.invalid_rules');
+    }
+    if (winsToClinch < 1) {
+      throw new AppError('series.winsToClinch must be at least 1.', 400, 'tournament.invalid_rules');
+    }
+    if (winsToClinch > totalMatches) {
+      throw new AppError(
+        'series.winsToClinch cannot exceed series.totalMatches.',
+        400,
+        'tournament.invalid_rules'
+      );
+    }
+    return;
+  }
+
+  if (seriesRules?.totalMatches !== undefined || seriesRules?.winsToClinch !== undefined) {
+    throw new AppError(
+      'series rules are supported only for SERIES tournaments.',
+      400,
+      'tournament.invalid_rules'
+    );
+  }
+
   if (type !== 'LEAGUE_KNOCKOUT') {
     if (qualificationCount !== undefined) {
       throw new AppError(
@@ -233,13 +299,14 @@ const resolveNextKnockoutStage = (winnerCount: number): KnockoutStage | null => 
 
 const buildTournamentOverviewDescription = (
   tournament: {
-    type: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT';
+    type: TournamentType;
     status: 'DRAFT' | 'ACTIVE' | 'COMPLETED';
     oversPerInnings: number;
     ballsPerOver?: number;
     rules?: {
       points?: { win?: number; tie?: number; noResult?: number; loss?: number };
       qualificationCount?: number;
+      series?: { totalMatches?: number | null; winsToClinch?: number | null } | null;
     };
     stageStatus?: {
       league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -259,6 +326,7 @@ const buildTournamentOverviewDescription = (
 ) => {
   const ballsPerOver = tournament.ballsPerOver ?? 6;
   const points = getPointsRules(tournament);
+  const seriesRules = getSeriesRules(tournament);
   const parts: string[] = [];
 
   parts.push(
@@ -289,7 +357,13 @@ const buildTournamentOverviewDescription = (
     );
   }
 
-  if (tournament.type === 'LEAGUE') {
+  if (tournament.type === 'SERIES') {
+    parts.push(
+      `Series is first to ${seriesRules.winsToClinch} wins across up to ${seriesRules.totalMatches} matches.`
+    );
+  }
+
+  if (tournament.type === 'LEAGUE' || tournament.type === 'SERIES') {
     parts.push('Tied league matches remain tied and points are shared by tournament rules.');
   } else {
     parts.push(
@@ -302,13 +376,14 @@ const buildTournamentOverviewDescription = (
 
 const buildTournamentOverview = (
   tournament: {
-    type: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT';
+    type: TournamentType;
     status: 'DRAFT' | 'ACTIVE' | 'COMPLETED';
     oversPerInnings: number;
     ballsPerOver?: number;
     rules?: {
       points?: { win?: number; tie?: number; noResult?: number; loss?: number };
       qualificationCount?: number;
+      series?: { totalMatches?: number | null; winsToClinch?: number | null } | null;
     };
     stageStatus?: {
       league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -328,6 +403,7 @@ const buildTournamentOverview = (
 ) => {
   const ballsPerOver = tournament.ballsPerOver ?? 6;
   const points = getPointsRules(tournament);
+  const seriesRules = getSeriesRules(tournament);
 
   return {
     type: tournament.type,
@@ -353,7 +429,7 @@ const buildTournamentOverview = (
       },
       knockout: {
         status:
-          tournament.type === 'LEAGUE'
+          tournament.type === 'LEAGUE' || tournament.type === 'SERIES'
             ? 'PENDING'
             : (tournament.stageStatus?.knockout ?? 'PENDING'),
         totalMatches: counts.knockoutTotal,
@@ -365,17 +441,24 @@ const buildTournamentOverview = (
     },
     rules: {
       points:
-        tournament.type === 'LEAGUE' || tournament.type === 'LEAGUE_KNOCKOUT'
+        tournament.type === 'LEAGUE' || tournament.type === 'LEAGUE_KNOCKOUT' || tournament.type === 'SERIES'
           ? {
               win: points.win,
               tie: points.tie,
               noResult: points.noResult,
               loss: points.loss
             }
+          : null,
+      series:
+        tournament.type === 'SERIES'
+          ? {
+              totalMatches: seriesRules.totalMatches,
+              winsToClinch: seriesRules.winsToClinch
+            }
           : null
     },
     tiePolicy:
-      tournament.type === 'LEAGUE'
+      tournament.type === 'LEAGUE' || tournament.type === 'SERIES'
         ? 'LEAGUE_TIE_SHARED'
         : 'KNOCKOUT_SUPER_OVER_THEN_TIE_BREAK'
   };
@@ -518,7 +601,7 @@ const getLeagueStandingsRows = async (tenantId: string, tournamentId: string) =>
 
 export const createTournament = async (input: TournamentCreateInput) => {
   ensureObjectId(input.tenantId, 'Invalid tenant id.');
-  validateTournamentConfig(input.type, input.rules?.qualificationCount);
+  validateTournamentConfig(input.type, input.rules);
 
   const status = input.status ?? 'DRAFT';
   const requestedLeagueStage = input.stageStatus?.league;
@@ -533,7 +616,10 @@ export const createTournament = async (input: TournamentCreateInput) => {
           : 'PENDING');
   const knockoutStage =
     input.stageStatus?.knockout ??
-    (status === 'COMPLETED' && input.type !== 'LEAGUE' ? 'COMPLETED' : 'PENDING');
+    (status === 'COMPLETED' && (input.type === 'KNOCKOUT' || input.type === 'LEAGUE_KNOCKOUT')
+      ? 'COMPLETED'
+      : 'PENDING');
+  const seriesRules = getSeriesRules({ rules: input.rules });
 
   const tournament = await TournamentModel.create({
     tenantId: input.tenantId,
@@ -552,8 +638,15 @@ export const createTournament = async (input: TournamentCreateInput) => {
         noResult: input.rules?.points?.noResult ?? 1,
         loss: input.rules?.points?.loss ?? 0
       },
-      qualificationCount: input.rules?.qualificationCount ?? 4,
-      seeding: input.rules?.seeding ?? 'STANDARD'
+      qualificationCount: input.type === 'LEAGUE_KNOCKOUT' ? input.rules?.qualificationCount ?? 4 : undefined,
+      seeding: input.rules?.seeding ?? 'STANDARD',
+      series:
+        input.type === 'SERIES'
+          ? {
+              totalMatches: seriesRules.totalMatches,
+              winsToClinch: seriesRules.winsToClinch
+            }
+          : undefined
     },
     stageStatus: {
       league: leagueStage,
@@ -590,8 +683,18 @@ export const duplicateTournament = async (input: DuplicateTournamentInput) => {
         noResult: sourceTournament.rules?.points?.noResult ?? 1,
         loss: sourceTournament.rules?.points?.loss ?? 0
       },
-      qualificationCount: sourceTournament.rules?.qualificationCount ?? 4,
-      seeding: sourceTournament.rules?.seeding ?? 'STANDARD'
+      qualificationCount:
+        sourceTournament.type === 'LEAGUE_KNOCKOUT'
+          ? sourceTournament.rules?.qualificationCount ?? 4
+          : undefined,
+      seeding: sourceTournament.rules?.seeding ?? 'STANDARD',
+      series:
+        sourceTournament.type === 'SERIES'
+          ? {
+              totalMatches: sourceTournament.rules?.series?.totalMatches ?? 3,
+              winsToClinch: sourceTournament.rules?.series?.winsToClinch ?? 2
+            }
+          : undefined
     },
     stageStatus: {
       league: 'PENDING',
@@ -1415,11 +1518,43 @@ export const getTournamentStandings = async (tenantId: string, id: string) => {
     throw new AppError('Tournament not found.', 404, 'tournament.not_found');
   }
 
-  if (tournament.type !== 'LEAGUE' && tournament.type !== 'LEAGUE_KNOCKOUT') {
+  if (
+    tournament.type !== 'LEAGUE' &&
+    tournament.type !== 'LEAGUE_KNOCKOUT' &&
+    tournament.type !== 'SERIES'
+  ) {
     throw new AppError('Standings are available for league formats only.', 400, 'tournament.unsupported_type');
   }
 
   const { rows, leagueMatchesCount, completedCount } = await getLeagueStandingsRows(tenantId, id);
+  if (tournament.type === 'SERIES') {
+    const seriesRules = getSeriesRules(tournament);
+    const hasWinner = rows.some((row) => row.won >= seriesRules.winsToClinch);
+    return {
+      tournamentId: tournament._id.toString(),
+      stage: 'SERIES',
+      seriesCompleted: hasWinner || completedCount >= seriesRules.totalMatches,
+      totalSeriesMatches: seriesRules.totalMatches,
+      completedSeriesMatches: completedCount,
+      winsToClinch: seriesRules.winsToClinch,
+      items: rows.map((row, index) => ({
+        rank: index + 1,
+        team: {
+          id: row.teamId,
+          name: row.teamName,
+          shortName: row.shortName ?? null
+        },
+        played: row.played,
+        won: row.won,
+        lost: row.lost,
+        tied: row.tied,
+        noResult: row.noResult,
+        points: row.points,
+        netRunRate: row.netRunRate
+      }))
+    };
+  }
+
   return {
     tournamentId: tournament._id.toString(),
     stage: 'LEAGUE',
@@ -1453,7 +1588,11 @@ export const recomputeTournamentStandings = async (tenantId: string, id: string)
     throw new AppError('Tournament not found.', 404, 'tournament.not_found');
   }
 
-  if (tournament.type !== 'LEAGUE' && tournament.type !== 'LEAGUE_KNOCKOUT') {
+  if (
+    tournament.type !== 'LEAGUE' &&
+    tournament.type !== 'LEAGUE_KNOCKOUT' &&
+    tournament.type !== 'SERIES'
+  ) {
     throw new AppError('Standings are available for league formats only.', 400, 'tournament.unsupported_type');
   }
 
@@ -1718,17 +1857,35 @@ export const updateTournament = async (
   }
 
   const nextType = updates.type ?? tournament.type;
-  const nextQualificationCount =
-    updates.rules?.qualificationCount ?? tournament.rules?.qualificationCount;
-  // When switching away from LEAGUE_KNOCKOUT, an existing stored qualificationCount
-  // should not block the type change unless user explicitly sends it in this PATCH.
-  const qualificationToValidate =
-    nextType === 'LEAGUE_KNOCKOUT' ? nextQualificationCount : updates.rules?.qualificationCount;
-  validateTournamentConfig(nextType, qualificationToValidate);
+  const mergedRules = {
+    points: {
+      win: updates.rules?.points?.win ?? tournament.rules?.points?.win ?? 2,
+      tie: updates.rules?.points?.tie ?? tournament.rules?.points?.tie ?? 1,
+      noResult: updates.rules?.points?.noResult ?? tournament.rules?.points?.noResult ?? 1,
+      loss: updates.rules?.points?.loss ?? tournament.rules?.points?.loss ?? 0
+    },
+    qualificationCount: updates.rules?.qualificationCount ?? tournament.rules?.qualificationCount,
+    seeding: updates.rules?.seeding ?? tournament.rules?.seeding ?? 'STANDARD',
+    series: {
+      totalMatches:
+        updates.rules?.series?.totalMatches ?? tournament.rules?.series?.totalMatches ?? 3,
+      winsToClinch:
+        updates.rules?.series?.winsToClinch ?? tournament.rules?.series?.winsToClinch ?? 2
+    }
+  };
 
-  if (nextType === 'LEAGUE_KNOCKOUT' && nextQualificationCount !== undefined) {
+  validateTournamentConfig(nextType, {
+    qualificationCount:
+      nextType === 'LEAGUE_KNOCKOUT' ? mergedRules.qualificationCount : updates.rules?.qualificationCount,
+    series:
+      nextType === 'SERIES'
+        ? mergedRules.series
+        : updates.rules?.series
+  });
+
+  if (nextType === 'LEAGUE_KNOCKOUT' && mergedRules.qualificationCount !== undefined) {
     const teamCount = await scopedFind(TeamModel, tenantId, { tournamentId: id }).countDocuments();
-    if (nextQualificationCount > teamCount) {
+    if (mergedRules.qualificationCount > teamCount) {
       throw new AppError(
         'qualificationCount cannot exceed registered teams.',
         400,
@@ -1744,6 +1901,17 @@ export const updateTournament = async (
     }
   }
 
+  if (nextType === 'SERIES') {
+    const teamCount = await scopedFind(TeamModel, tenantId, { tournamentId: id }).countDocuments();
+    if (teamCount > 2) {
+      throw new AppError(
+        'SERIES tournaments support only 2 teams.',
+        400,
+        'tournament.invalid_rules'
+      );
+    }
+  }
+
   if (updates.name !== undefined) tournament.name = updates.name;
   if (updates.location !== undefined) tournament.location = updates.location ?? undefined;
   if (updates.startDate !== undefined) tournament.startDate = updates.startDate ?? undefined;
@@ -1754,15 +1922,36 @@ export const updateTournament = async (
   if (updates.status !== undefined) tournament.status = updates.status;
   if (updates.rules !== undefined) {
     tournament.rules = {
-      points: {
-        win: updates.rules.points?.win ?? tournament.rules?.points?.win ?? 2,
-        tie: updates.rules.points?.tie ?? tournament.rules?.points?.tie ?? 1,
-        noResult: updates.rules.points?.noResult ?? tournament.rules?.points?.noResult ?? 1,
-        loss: updates.rules.points?.loss ?? tournament.rules?.points?.loss ?? 0
-      },
+      points: mergedRules.points,
       qualificationCount:
-        updates.rules.qualificationCount ?? tournament.rules?.qualificationCount ?? 4,
-      seeding: updates.rules.seeding ?? tournament.rules?.seeding ?? 'STANDARD'
+        nextType === 'LEAGUE_KNOCKOUT'
+          ? mergedRules.qualificationCount ?? 4
+          : tournament.rules?.qualificationCount ?? 4,
+      seeding: mergedRules.seeding,
+      series:
+        nextType === 'SERIES'
+          ? {
+              totalMatches: Number(mergedRules.series.totalMatches ?? 3),
+              winsToClinch: Number(mergedRules.series.winsToClinch ?? 2)
+            }
+          : undefined
+    };
+  }
+  if (updates.type !== undefined && updates.rules === undefined) {
+    tournament.rules = {
+      points: mergedRules.points,
+      qualificationCount:
+        nextType === 'LEAGUE_KNOCKOUT'
+          ? mergedRules.qualificationCount ?? 4
+          : tournament.rules?.qualificationCount ?? 4,
+      seeding: mergedRules.seeding,
+      series:
+        nextType === 'SERIES'
+          ? {
+              totalMatches: Number(mergedRules.series.totalMatches ?? 3),
+              winsToClinch: Number(mergedRules.series.winsToClinch ?? 2)
+            }
+          : undefined
     };
   }
   if (updates.stageStatus !== undefined) {
@@ -1782,7 +1971,10 @@ export const updateTournament = async (
   if (updates.status === 'COMPLETED' && !updates.stageStatus) {
     tournament.stageStatus = {
       league: tournament.type === 'KNOCKOUT' ? 'PENDING' : 'COMPLETED',
-      knockout: tournament.type === 'LEAGUE' ? 'PENDING' : 'COMPLETED'
+      knockout:
+        tournament.type === 'LEAGUE' || tournament.type === 'SERIES'
+          ? 'PENDING'
+          : 'COMPLETED'
     };
   }
 
@@ -1799,15 +1991,43 @@ export const syncLeagueCompletionStatus = async (tenantId: string, tournamentId:
     throw new AppError('Tournament not found.', 404, 'tournament.not_found');
   }
 
-  if (tournament.type !== 'LEAGUE' && tournament.type !== 'LEAGUE_KNOCKOUT') {
+  if (tournament.type !== 'LEAGUE' && tournament.type !== 'LEAGUE_KNOCKOUT' && tournament.type !== 'SERIES') {
     return tournament;
   }
 
-  const pendingLeagueMatch = await scopedFindOne(MatchModel, tenantId, {
-    tournamentId,
-    stage: 'LEAGUE',
-    status: { $ne: 'COMPLETED' }
-  });
+  const [pendingLeagueMatch, completedLeagueMatches] = await Promise.all([
+    scopedFindOne(MatchModel, tenantId, {
+      tournamentId,
+      stage: 'LEAGUE',
+      status: { $ne: 'COMPLETED' }
+    }),
+    scopedFind(MatchModel, tenantId, {
+      tournamentId,
+      stage: 'LEAGUE',
+      status: 'COMPLETED'
+    }).select({ result: 1 })
+  ]);
+
+  if (tournament.type === 'SERIES') {
+    const seriesRules = getSeriesRules(tournament);
+    const winsByTeam = new Map<string, number>();
+    completedLeagueMatches.forEach((entry) => {
+      const winner = entry.result?.winnerTeamId?.toString();
+      if (!winner) return;
+      winsByTeam.set(winner, (winsByTeam.get(winner) ?? 0) + 1);
+    });
+
+    const clinched = [...winsByTeam.values()].some((wins) => wins >= seriesRules.winsToClinch);
+    if (clinched || completedLeagueMatches.length >= seriesRules.totalMatches) {
+      tournament.stageStatus = {
+        league: 'COMPLETED',
+        knockout: 'PENDING'
+      };
+      tournament.status = 'COMPLETED';
+      await tournament.save();
+      return tournament;
+    }
+  }
 
   if (pendingLeagueMatch) {
     tournament.stageStatus = {
@@ -1823,7 +2043,7 @@ export const syncLeagueCompletionStatus = async (tenantId: string, tournamentId:
     knockout: tournament.type === 'LEAGUE_KNOCKOUT' ? tournament.stageStatus?.knockout ?? 'PENDING' : 'PENDING'
   };
 
-  if (tournament.type === 'LEAGUE') {
+  if (tournament.type === 'LEAGUE' || tournament.type === 'SERIES') {
     tournament.status = 'COMPLETED';
   }
 

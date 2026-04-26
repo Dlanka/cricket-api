@@ -735,6 +735,32 @@ export const generateFixtures = async (
     return { created: matches.length };
   }
 
+  if (tournament.type === 'SERIES') {
+    if (teams.length !== 2) {
+      throw new AppError(
+        'SERIES tournaments require exactly 2 teams.',
+        400,
+        'match.invalid_series_teams'
+      );
+    }
+
+    const totalMatches = tournament.rules?.series?.totalMatches ?? 3;
+    const matches = Array.from({ length: totalMatches }, (_, index) => ({
+      tenantId,
+      tournamentId,
+      teamAId: teams[0]._id.toString(),
+      teamBId: teams[1]._id.toString(),
+      stage: 'LEAGUE' as const,
+      status: 'SCHEDULED' as const,
+      roundNumber: index + 1,
+      oversPerInnings: tournament.oversPerInnings,
+      ballsPerOver: tournament.ballsPerOver ?? 6
+    }));
+
+    await MatchModel.insertMany(matches);
+    return { created: matches.length };
+  }
+
   if (tournament.type === 'KNOCKOUT') {
     let orderedTeams = teams;
 

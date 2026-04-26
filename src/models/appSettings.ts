@@ -25,7 +25,7 @@ const tournamentDefaultsSchema = new Schema(
   {
     defaultType: {
       type: String,
-      enum: ['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT'],
+      enum: ['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT', 'SERIES'],
       default: 'LEAGUE',
       required: true
     },

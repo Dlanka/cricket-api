@@ -41,7 +41,20 @@ export const createTeam = async (input: TeamCreateInput) => {
   ensureObjectId(input.tenantId, 'Invalid tenant id.');
   ensureObjectId(input.tournamentId, 'Invalid tournament id.');
 
-  await ensureTournament(input.tenantId, input.tournamentId);
+  const tournament = await ensureTournament(input.tenantId, input.tournamentId);
+  if (tournament.type === 'SERIES') {
+    const existingCount = await TeamModel.countDocuments({
+      tenantId: input.tenantId,
+      tournamentId: input.tournamentId
+    });
+    if (existingCount >= 2) {
+      throw new AppError(
+        'SERIES tournaments support exactly 2 teams.',
+        409,
+        'team.series_team_limit'
+      );
+    }
+  }
   const lastTeam = await TeamModel.findOne({
     tenantId: input.tenantId,
     tournamentId: input.tournamentId
@@ -132,9 +145,13 @@ export const reorderTeamsByTournament = async (
   }
 
   const tournament = await ensureTournament(tenantId, tournamentId);
-  if (tournament.type !== 'KNOCKOUT' && tournament.type !== 'LEAGUE_KNOCKOUT') {
+  if (
+    tournament.type !== 'KNOCKOUT' &&
+    tournament.type !== 'LEAGUE_KNOCKOUT' &&
+    tournament.type !== 'SERIES'
+  ) {
     throw new AppError(
-      'Team reorder is allowed only for Knockout and League + Knockout tournaments.',
+      'Team reorder is allowed only for Knockout, League + Knockout, and Series tournaments.',
       409,
       'team.reorder_not_allowed'
     );

@@ -1,6 +1,6 @@
 import { Schema, model, type InferSchemaType, type Model, models } from 'mongoose';
 
-const tournamentTypes = ['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT'] as const;
+const tournamentTypes = ['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT', 'SERIES'] as const;
 const tournamentStatuses = ['DRAFT', 'ACTIVE', 'COMPLETED'] as const;
 const stageStatuses = ['PENDING', 'ACTIVE', 'COMPLETED'] as const;
 
@@ -47,6 +47,16 @@ const tournamentRulesSchema = new Schema(
       type: String,
       enum: ['STANDARD'],
       default: 'STANDARD'
+    },
+    series: {
+      totalMatches: {
+        type: Number,
+        min: 1
+      },
+      winsToClinch: {
+        type: Number,
+        min: 1
+      }
     }
   },
   {

@@ -12,7 +12,7 @@ export type AppSettingsUpdateInput = {
     logoUrl?: string | null;
   };
   tournamentDefaults?: {
-    defaultType?: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT';
+    defaultType?: 'LEAGUE' | 'KNOCKOUT' | 'LEAGUE_KNOCKOUT' | 'SERIES';
     defaultOversPerInnings?: number;
     defaultBallsPerOver?: number;
     defaultQualificationCount?: number;

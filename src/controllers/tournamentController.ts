@@ -16,7 +16,7 @@ import {
   updateTournament
 } from '../services/tournamentService';
 
-const tournamentTypeSchema = z.enum(['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT']);
+const tournamentTypeSchema = z.enum(['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT', 'SERIES']);
 const tournamentStatusSchema = z.enum(['DRAFT', 'ACTIVE', 'COMPLETED']);
 const stageStatusSchema = z.enum(['PENDING', 'ACTIVE', 'COMPLETED']);
 const rulesSchema = z
@@ -30,7 +30,13 @@ const rulesSchema = z
       })
       .optional(),
     qualificationCount: z.coerce.number().int().min(2).optional(),
-    seeding: z.enum(['STANDARD']).optional()
+    seeding: z.enum(['STANDARD']).optional(),
+    series: z
+      .object({
+        totalMatches: z.coerce.number().int().min(1),
+        winsToClinch: z.coerce.number().int().min(1)
+      })
+      .optional()
   })
   .optional();
 const tournamentStageSchema = z

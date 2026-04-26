@@ -20,7 +20,7 @@ const updateAppSettingsSchema = z
       .optional(),
     tournamentDefaults: z
       .object({
-        defaultType: z.enum(['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT']).optional(),
+        defaultType: z.enum(['LEAGUE', 'KNOCKOUT', 'LEAGUE_KNOCKOUT', 'SERIES']).optional(),
         defaultOversPerInnings: z.coerce.number().int().min(1).optional(),
         defaultBallsPerOver: z.coerce.number().int().min(1).optional(),
         defaultQualificationCount: z.coerce.number().int().min(2).optional(),
