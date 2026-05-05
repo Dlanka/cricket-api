@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
-import { getMatchSummary } from '../services/matchSummaryService';
+import { getMatchPlayerOfMatch, getMatchSummary } from '../services/matchSummaryService';
 import { AppError } from '../utils/appError';
 import { ok } from '../utils/apiResponse';
 
@@ -23,6 +23,17 @@ export const getMatchSummaryHandler = async (req: Request, res: Response, next: 
     const tenantId = getTenantId(req);
     const summary = await getMatchSummary(tenantId, matchId);
     return res.status(200).json(ok(summary));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getMatchPlayerOfMatchHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const tenantId = getTenantId(req);
+    const payload = await getMatchPlayerOfMatch(tenantId, matchId);
+    return res.status(200).json(ok(payload));
   } catch (error) {
     return next(error);
   }

@@ -247,6 +247,13 @@ export const ENDPOINT_AUTH_MATRIX: EndpointAuthMatrixRow[] = [
     area: 'match-center'
   },
   {
+    method: 'PATCH',
+    path: '/matches/:matchId/time-config',
+    action: 'tournament.manage',
+    auth: 'app',
+    area: 'match-center'
+  },
+  {
     method: 'POST',
     path: '/matches/:matchId/start',
     action: 'match.start',
@@ -263,6 +270,27 @@ export const ENDPOINT_AUTH_MATRIX: EndpointAuthMatrixRow[] = [
   {
     method: 'POST',
     path: '/matches/:matchId/start-super-over',
+    action: 'match.start',
+    auth: 'app',
+    area: 'match-center'
+  },
+  {
+    method: 'POST',
+    path: '/matches/:matchId/timer/start',
+    action: 'match.start',
+    auth: 'app',
+    area: 'match-center'
+  },
+  {
+    method: 'POST',
+    path: '/matches/:matchId/timer/pause',
+    action: 'match.start',
+    auth: 'app',
+    area: 'match-center'
+  },
+  {
+    method: 'POST',
+    path: '/matches/:matchId/timer/resume',
     action: 'match.start',
     auth: 'app',
     area: 'match-center'
@@ -337,6 +365,13 @@ export const ENDPOINT_AUTH_MATRIX: EndpointAuthMatrixRow[] = [
     action: null,
     auth: 'app',
     area: 'scoring'
+  },
+  {
+    method: 'GET',
+    path: '/matches/:matchId/awards/player-of-match',
+    action: null,
+    auth: 'app',
+    area: 'awards'
   },
   { method: 'GET', path: '/innings/:inningsId/batters', action: null, auth: 'app', area: 'scoring' },
   { method: 'GET', path: '/innings/:inningsId/bowlers', action: null, auth: 'app', area: 'scoring' },

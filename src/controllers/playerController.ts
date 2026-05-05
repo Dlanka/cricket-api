@@ -16,7 +16,8 @@ const createPlayerSchema = z.object({
   jerseyNumber: z.coerce.number().int().min(0).optional(),
   battingStyle: z.enum(BATTING_STYLES).optional(),
   bowlingStyle: z.enum(BOWLING_STYLES).optional(),
-  isWicketKeeper: z.coerce.boolean().optional()
+  isWicketKeeper: z.coerce.boolean().optional(),
+  defaultInSquad: z.coerce.boolean().optional()
 });
 
 const updatePlayerSchema = z
@@ -25,7 +26,8 @@ const updatePlayerSchema = z
     jerseyNumber: z.coerce.number().int().min(0).optional(),
     battingStyle: z.enum(BATTING_STYLES).optional(),
     bowlingStyle: z.enum(BOWLING_STYLES).optional(),
-    isWicketKeeper: z.coerce.boolean().optional()
+    isWicketKeeper: z.coerce.boolean().optional(),
+    defaultInSquad: z.coerce.boolean().optional()
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: 'At least one field must be provided.'

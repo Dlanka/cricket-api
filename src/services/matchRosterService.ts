@@ -41,9 +41,9 @@ export const replaceRoster = async (input: RosterInput) => {
   ensureObjectId(input.matchId, 'Invalid match id.');
   ensureObjectId(input.teamId, 'Invalid team id.');
 
-  if (input.playingPlayerIds.length < 1 || input.playingPlayerIds.length > 11) {
+  if (input.playingPlayerIds.length < 1) {
     throw new AppError(
-      'Playing roster must include between 1 and 11 players.',
+      'Playing roster must include at least 1 player.',
       400,
       'match.roster_size_invalid'
     );

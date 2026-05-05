@@ -80,6 +80,18 @@ const wicketSchema = z
     }
   });
 
+const correctionReplacementSchema = z.discriminatedUnion('type', [
+  runSchema,
+  extraSchema,
+  wicketSchema
+]);
+
+const correctBallSchema = z.object({
+  type: z.literal('correctBall'),
+  targetSeq: z.number().int().min(1),
+  replacement: correctionReplacementSchema
+});
+
 const swapSchema = z.object({
   type: z.literal('swap')
 });
@@ -100,6 +112,14 @@ const retireSchema = z.object({
   }
 });
 
+const penaltySchema = z.object({
+  type: z.literal('penalty'),
+  runs: z.number().int().min(-10).max(10).refine((value) => value !== 0, {
+    message: 'Penalty runs must be non-zero.'
+  }),
+  reason: z.string().trim().min(1).max(200).optional()
+});
+
 const undoSchema = z.object({
   type: z.literal('undo')
 });
@@ -108,8 +128,10 @@ const scoreEventSchema = z.discriminatedUnion('type', [
   runSchema,
   extraSchema,
   wicketSchema,
+  correctBallSchema,
   swapSchema,
   retireSchema,
+  penaltySchema,
   undoSchema
 ]);
 
@@ -127,11 +149,22 @@ export const scoreMatchEventHandler = async (req: Request, res: Response, next: 
     const payload = scoreEventSchema.parse(req.body);
     const auth = getAuth(req);
 
+    const normalizedPayload =
+      payload.type === 'penalty'
+        ? (() => {
+            const { runs, ...rest } = payload;
+            return {
+              ...rest,
+              penaltyRuns: runs
+            };
+          })()
+        : payload;
+
     const result = await scoreMatchEvent({
       tenantId: auth.tenantId,
       matchId,
       createdByUserId: auth.userId,
-      ...payload
+      ...normalizedPayload
     });
 
     return res.status(200).json(ok(result));

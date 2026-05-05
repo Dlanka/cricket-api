@@ -83,6 +83,45 @@ const formatOvers = (balls: number, ballsPerOver: number) => {
   return `${completedOvers}.${ballsInOver}`;
 };
 
+const resolveTimerState = (
+  match: {
+    timeConfig?: { totalMatchMinutes?: number | null; splitByInnings?: boolean | null } | null;
+    timer?: { status?: 'IDLE' | 'RUNNING' | 'PAUSED'; accumulatedMs?: number; lastResumedAt?: Date | null } | null;
+  },
+  inningsNumber?: number | null
+) => {
+  const status = match.timer?.status ?? 'IDLE';
+  const accumulatedMs = Math.max(0, match.timer?.accumulatedMs ?? 0);
+  const lastResumedAt = match.timer?.lastResumedAt ? new Date(match.timer.lastResumedAt).getTime() : null;
+  const runningMs =
+    status === 'RUNNING' && lastResumedAt != null ? Math.max(0, Date.now() - lastResumedAt) : 0;
+  const elapsedMs = accumulatedMs + runningMs;
+  const totalMatchMinutes = match.timeConfig?.totalMatchMinutes ?? null;
+  const splitByInnings = Boolean(match.timeConfig?.splitByInnings);
+  const totalMatchMs =
+    typeof totalMatchMinutes === 'number' && Number.isFinite(totalMatchMinutes) && totalMatchMinutes > 0
+      ? totalMatchMinutes * 60 * 1000
+      : null;
+  const targetMs =
+    totalMatchMs == null
+      ? null
+      : splitByInnings && inningsNumber != null
+        ? Math.floor(totalMatchMs / 2)
+        : totalMatchMs;
+  const remainingMs = targetMs == null ? null : Math.max(0, targetMs - elapsedMs);
+  const isOvertime = targetMs != null ? elapsedMs > targetMs : false;
+
+  return {
+    status,
+    elapsedMs,
+    targetMs,
+    remainingMs,
+    isOvertime,
+    totalMatchMinutes,
+    splitByInnings
+  };
+};
+
 const isLegalDeliveryEvent = (event: { type: string; isLegal?: boolean; payload?: Record<string, unknown> }) => {
   if (typeof event.isLegal === 'boolean') {
     return event.isLegal;
@@ -140,14 +179,14 @@ const ensureTeamIdsInMatch = (
   }
 };
 
-type KnockoutStage = 'R1' | 'QF' | 'SF' | 'FINAL';
+type KnockoutStage = 'R1' | 'QF' | 'SF' | 'THIRD_PLACE' | 'FINAL';
 type MatchStage = 'LEAGUE' | KnockoutStage;
 
-const knockoutStageOrder: KnockoutStage[] = ['R1', 'QF', 'SF', 'FINAL'];
-const matchStageOrder: MatchStage[] = ['LEAGUE', 'R1', 'QF', 'SF', 'FINAL'];
+const knockoutStageOrder: KnockoutStage[] = ['R1', 'QF', 'SF', 'THIRD_PLACE', 'FINAL'];
+const matchStageOrder: MatchStage[] = ['LEAGUE', 'R1', 'QF', 'SF', 'THIRD_PLACE', 'FINAL'];
 
 const isKnockoutStage = (stage: string): stage is KnockoutStage =>
-  stage === 'R1' || stage === 'QF' || stage === 'SF' || stage === 'FINAL';
+  stage === 'R1' || stage === 'QF' || stage === 'SF' || stage === 'THIRD_PLACE' || stage === 'FINAL';
 
 const resolveNextKnockoutStage = (winnerCount: number): KnockoutStage | null => {
   if (winnerCount > 8) return 'R1';
@@ -261,10 +300,19 @@ export const getTournamentFixturesBracket = async (tenantId: string, tournamentI
 
   if (tournament.type === 'LEAGUE_KNOCKOUT') {
     const configuredCount = tournament.rules?.qualificationCount ?? 4;
-    const hasSemis = configuredCount >= 4;
+    const hasSemis = configuredCount >= 4 && teams.length > 4;
+    const includeThirdPlaceMatch = tournament.rules?.includeThirdPlaceMatch ?? false;
     if (hasSemis) {
       plannedRounds.push({ stage: 'SF', roundNumber: 1, slots: 2 });
+      if (includeThirdPlaceMatch) {
+        plannedRounds.push({ stage: 'THIRD_PLACE', roundNumber: 2, slots: 1 });
+      }
       plannedRounds.push({ stage: 'FINAL', roundNumber: 2, slots: 1 });
+    } else if (configuredCount >= 4) {
+      if (includeThirdPlaceMatch) {
+        plannedRounds.push({ stage: 'THIRD_PLACE', roundNumber: 1, slots: 1 });
+      }
+      plannedRounds.push({ stage: 'FINAL', roundNumber: 1, slots: 1 });
     } else {
       plannedRounds.push({ stage: 'FINAL', roundNumber: 1, slots: 1 });
     }
@@ -475,6 +523,11 @@ export const getMatchById = async (tenantId: string, matchId: string) => {
         }
       : null,
     phase: match.phase ?? 'REGULAR',
+    timeConfig: {
+      totalMatchMinutes: match.timeConfig?.totalMatchMinutes ?? null,
+      splitByInnings: Boolean(match.timeConfig?.splitByInnings)
+    },
+    timer: resolveTimerState(match, null),
     hasSuperOver: match.hasSuperOver ?? false,
     superOverStatus: match.superOverStatus ?? null,
     superOver: {
@@ -531,8 +584,52 @@ export const updateMatchConfig = async (input: UpdateMatchConfigInput) => {
 
   const match = await ensureMatch(input.tenantId, input.matchId);
 
-  if (match.status !== 'SCHEDULED') {
-    throw new AppError('Match config can be changed only while scheduled.', 409, 'match.invalid_state');
+  if (match.status !== 'SCHEDULED' && match.status !== 'LIVE') {
+    throw new AppError('Match config can be changed only while scheduled or before first ball in live match.', 409, 'match.invalid_state');
+  }
+
+  if (match.status === 'LIVE') {
+    if (!match.currentInningsId) {
+      throw new AppError('Match has no active innings.', 409, 'innings.not_started');
+    }
+
+    const innings = await scopedFindOne(InningsModel, input.tenantId, {
+      _id: match.currentInningsId,
+      matchId: input.matchId,
+      status: 'LIVE'
+    });
+
+    if (!innings) {
+      throw new AppError('Innings not found.', 404, 'innings.not_found');
+    }
+
+    if (input.oversPerInnings !== undefined) {
+      match.oversPerInnings = input.oversPerInnings;
+      innings.oversPerInnings = input.oversPerInnings;
+    }
+
+    if (input.ballsPerOver !== undefined) {
+      if (innings.balls > 0) {
+        throw new AppError(
+          'Balls per over is locked after first legal ball of the innings.',
+          409,
+          'match.config_locked'
+        );
+      }
+      match.ballsPerOver = input.ballsPerOver;
+      innings.ballsPerOver = input.ballsPerOver;
+    }
+
+    await Promise.all([match.save(), innings.save()]);
+    invalidateCachedMatchScore(input.tenantId, input.matchId);
+    emitMatchScoreRefresh(input.tenantId, input.matchId);
+
+    return {
+      matchId: match._id.toString(),
+      oversPerInnings: match.oversPerInnings,
+      ballsPerOver: match.ballsPerOver,
+      status: match.status
+    };
   }
 
   const [innings, scoreEvent] = await Promise.all([
@@ -875,6 +972,14 @@ export type ChangeCurrentBowlerInput = {
   bowlerId: string;
 };
 
+export type ChangeOnFieldBattersInput = {
+  tenantId: string;
+  matchId: string;
+  strikerId: string;
+  nonStrikerId: string;
+  transferStats?: boolean;
+};
+
 export type SetMatchTossInput = {
   tenantId: string;
   matchId: string;
@@ -887,6 +992,13 @@ export type UpdateMatchConfigInput = {
   matchId: string;
   oversPerInnings?: number;
   ballsPerOver?: number;
+};
+
+export type UpdateMatchTimeConfigInput = {
+  tenantId: string;
+  matchId: string;
+  totalMatchMinutes?: number;
+  splitByInnings?: boolean;
 };
 
 export type ResolveMatchTieInput = {
@@ -1278,6 +1390,277 @@ export const changeCurrentBowler = async (input: ChangeCurrentBowlerInput) => {
   };
 };
 
+export const updateMatchTimeConfig = async (input: UpdateMatchTimeConfigInput) => {
+  ensureObjectId(input.tenantId, 'Invalid tenant id.');
+  ensureObjectId(input.matchId, 'Invalid match id.');
+
+  const match = await ensureMatch(input.tenantId, input.matchId);
+  const existing = match.timeConfig ?? {};
+  match.timeConfig = {
+    totalMatchMinutes: input.totalMatchMinutes ?? existing.totalMatchMinutes,
+    splitByInnings: input.splitByInnings ?? existing.splitByInnings ?? false
+  } as typeof match.timeConfig;
+  await match.save();
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
+
+  const timer = resolveTimerState(match, null);
+  return {
+    matchId: match._id.toString(),
+    timeConfig: {
+      totalMatchMinutes: timer.totalMatchMinutes,
+      splitByInnings: timer.splitByInnings
+    }
+  };
+};
+
+export const startMatchTimer = async (tenantId: string, matchId: string) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(matchId, 'Invalid match id.');
+  const match = await ensureMatch(tenantId, matchId);
+
+  if (match.status !== 'LIVE') {
+    throw new AppError('Match is not live.', 409, 'match.invalid_state');
+  }
+
+  match.timer = {
+    ...(match.timer ?? {}),
+    status: 'RUNNING',
+    accumulatedMs: 0,
+    lastResumedAt: new Date()
+  } as typeof match.timer;
+  await match.save();
+  invalidateCachedMatchScore(tenantId, matchId);
+  emitMatchScoreRefresh(tenantId, matchId);
+
+  return {
+    matchId: match._id.toString(),
+    timer: resolveTimerState(match, null)
+  };
+};
+
+export const pauseMatchTimer = async (tenantId: string, matchId: string) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(matchId, 'Invalid match id.');
+  const match = await ensureMatch(tenantId, matchId);
+
+  if (match.status !== 'LIVE') {
+    throw new AppError('Match is not live.', 409, 'match.invalid_state');
+  }
+
+  const timer = match.timer ?? {};
+  const nowMs = Date.now();
+  const lastResumedAtMs = timer.lastResumedAt ? new Date(timer.lastResumedAt).getTime() : null;
+  const elapsedSinceResume =
+    timer.status === 'RUNNING' && lastResumedAtMs != null ? Math.max(0, nowMs - lastResumedAtMs) : 0;
+  const accumulatedMs = Math.max(0, (timer.accumulatedMs ?? 0) + elapsedSinceResume);
+
+  match.timer = {
+    ...timer,
+    status: 'PAUSED',
+    accumulatedMs,
+    lastResumedAt: undefined
+  } as typeof match.timer;
+  await match.save();
+  invalidateCachedMatchScore(tenantId, matchId);
+  emitMatchScoreRefresh(tenantId, matchId);
+
+  return {
+    matchId: match._id.toString(),
+    timer: resolveTimerState(match, null)
+  };
+};
+
+export const resumeMatchTimer = async (tenantId: string, matchId: string) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(matchId, 'Invalid match id.');
+  const match = await ensureMatch(tenantId, matchId);
+
+  if (match.status !== 'LIVE') {
+    throw new AppError('Match is not live.', 409, 'match.invalid_state');
+  }
+
+  const timer = match.timer ?? {};
+  match.timer = {
+    ...timer,
+    status: 'RUNNING',
+    accumulatedMs: Math.max(0, timer.accumulatedMs ?? 0),
+    lastResumedAt: new Date()
+  } as typeof match.timer;
+  await match.save();
+  invalidateCachedMatchScore(tenantId, matchId);
+  emitMatchScoreRefresh(tenantId, matchId);
+
+  return {
+    matchId: match._id.toString(),
+    timer: resolveTimerState(match, null)
+  };
+};
+
+export const changeOnFieldBatters = async (input: ChangeOnFieldBattersInput) => {
+  ensureObjectId(input.tenantId, 'Invalid tenant id.');
+  ensureObjectId(input.matchId, 'Invalid match id.');
+  ensureObjectId(input.strikerId, 'Invalid striker id.');
+  ensureObjectId(input.nonStrikerId, 'Invalid non-striker id.');
+
+  if (input.strikerId === input.nonStrikerId) {
+    throw new AppError('Striker and non-striker must be different players.', 400, 'match.batting_pair_invalid');
+  }
+
+  const match = await ensureMatch(input.tenantId, input.matchId);
+
+  if (match.status !== 'LIVE') {
+    throw new AppError('Match is not live.', 409, 'match.invalid_state');
+  }
+
+  if (!match.currentInningsId) {
+    throw new AppError('Match has no active innings.', 409, 'innings.not_started');
+  }
+
+  const [innings, tournament] = await Promise.all([
+    scopedFindOne(InningsModel, input.tenantId, { _id: match.currentInningsId, matchId: input.matchId, status: 'LIVE' }),
+    ensureTournament(input.tenantId, match.tournamentId.toString())
+  ]);
+
+  if (!innings) {
+    throw new AppError('Innings not found.', 404, 'innings.not_found');
+  }
+
+  const currentOver = innings.currentOver as
+    | { overNumber?: number; legalBallsInOver?: number; balls?: unknown[] }
+    | undefined;
+
+  const ballsPerOver = innings.ballsPerOver ?? tournament.ballsPerOver ?? 6;
+  const legalBallsInOver =
+    typeof currentOver?.legalBallsInOver === 'number' &&
+    Number.isFinite(currentOver.legalBallsInOver)
+      ? currentOver.legalBallsInOver
+      : innings.balls % ballsPerOver;
+
+  if (legalBallsInOver !== 0) {
+    throw new AppError('Current over already started.', 409, 'match.over_started');
+  }
+
+  const battingRoster = await scopedFind(MatchPlayerModel, input.tenantId, {
+    matchId: input.matchId,
+    teamId: innings.battingTeamId,
+    isPlaying: true
+  });
+
+  if (battingRoster.length === 0) {
+    throw new AppError('Batting roster is missing.', 400, 'match.roster_missing');
+  }
+
+  const battingIds = new Set(battingRoster.map((r) => r.playerId.toString()));
+
+  if (!battingIds.has(input.strikerId) || !battingIds.has(input.nonStrikerId)) {
+    throw new AppError('Both batters must be in batting playing XI.', 400, 'match.batting_pair_invalid');
+  }
+
+  const inningsBatters = await scopedFind(InningsBatterModel, input.tenantId, {
+    inningsId: innings._id
+  });
+  const inningsBatterByPlayerId = new Map(
+    inningsBatters
+      .filter((entry) => entry.playerRef?.playerId)
+      .map((entry) => [entry.playerRef?.playerId?.toString() as string, entry])
+  );
+  const inningsBatterByDocId = new Map(inningsBatters.map((entry) => [entry._id.toString(), entry]));
+
+  const toOnFieldPlayerId = (rawId: string) => {
+    if (battingIds.has(rawId)) {
+      return rawId;
+    }
+    const batter = inningsBatterByDocId.get(rawId);
+    return batter?.playerRef?.playerId?.toString() ?? rawId;
+  };
+  const previousStrikerPlayerId = toOnFieldPlayerId(innings.strikerId.toString());
+  const previousNonStrikerPlayerId = toOnFieldPlayerId(innings.nonStrikerId.toString());
+
+  const outPlayerIds = new Set(
+    inningsBatters
+      .filter((entry) => entry.isOut && entry.playerRef?.playerId)
+      .map((entry) => entry.playerRef?.playerId?.toString())
+      .filter((playerId): playerId is string => Boolean(playerId))
+  );
+
+  if (outPlayerIds.has(input.strikerId) || outPlayerIds.has(input.nonStrikerId)) {
+    throw new AppError('Out batter cannot be set on field.', 400, 'match.batting_pair_invalid');
+  }
+
+  const maybeTransferBatterIdentity = async (fromPlayerId: string, toPlayerId: string) => {
+    if (!fromPlayerId || !toPlayerId || fromPlayerId === toPlayerId) {
+      return;
+    }
+
+    const fromEntry = inningsBatterByPlayerId.get(fromPlayerId);
+    if (!fromEntry) {
+      return;
+    }
+
+    const toEntry = inningsBatterByPlayerId.get(toPlayerId);
+    if (toEntry) {
+      toEntry.runs += fromEntry.runs;
+      toEntry.balls += fromEntry.balls;
+      toEntry.fours += fromEntry.fours;
+      toEntry.sixes += fromEntry.sixes;
+      if (fromEntry.isOut && !toEntry.isOut) {
+        toEntry.isOut = fromEntry.isOut;
+        toEntry.outKind = fromEntry.outKind;
+        toEntry.outFielderId = fromEntry.outFielderId;
+        toEntry.outFielderName = fromEntry.outFielderName;
+        toEntry.outBowlerId = fromEntry.outBowlerId;
+        toEntry.outBowlerName = fromEntry.outBowlerName;
+      }
+      await Promise.all([toEntry.save(), fromEntry.deleteOne()]);
+      inningsBatterByPlayerId.delete(fromPlayerId);
+      inningsBatterByPlayerId.set(toPlayerId, toEntry);
+      return;
+    }
+
+    const targetPlayer = await scopedFindOne(PlayerModel, input.tenantId, { _id: toPlayerId }).select({
+      _id: 1,
+      fullName: 1
+    });
+    fromEntry.playerRef = {
+      playerId: toPlayerId as any,
+      name: targetPlayer?.fullName ?? fromEntry.playerRef?.name ?? ''
+    };
+    fromEntry.batterKey = {
+      playerId: toPlayerId as any,
+      name: targetPlayer?.fullName ?? fromEntry.batterKey?.name ?? fromEntry.playerRef?.name ?? ''
+    };
+    await fromEntry.save();
+    inningsBatterByPlayerId.delete(fromPlayerId);
+    inningsBatterByPlayerId.set(toPlayerId, fromEntry);
+  };
+
+  const isSimpleSwap =
+    input.strikerId === previousNonStrikerPlayerId &&
+    input.nonStrikerId === previousStrikerPlayerId;
+  if (input.transferStats && !isSimpleSwap) {
+    if (input.strikerId !== previousStrikerPlayerId) {
+      await maybeTransferBatterIdentity(previousStrikerPlayerId, input.strikerId);
+    }
+    if (input.nonStrikerId !== previousNonStrikerPlayerId) {
+      await maybeTransferBatterIdentity(previousNonStrikerPlayerId, input.nonStrikerId);
+    }
+  }
+
+  innings.strikerId = input.strikerId as unknown as typeof innings.strikerId;
+  innings.nonStrikerId = input.nonStrikerId as unknown as typeof innings.nonStrikerId;
+  await innings.save();
+  invalidateCachedMatchScore(input.tenantId, input.matchId);
+  emitMatchScoreRefresh(input.tenantId, input.matchId);
+
+  return {
+    matchId: match._id.toString(),
+    inningsId: innings._id.toString(),
+    strikerId: innings.strikerId.toString(),
+    nonStrikerId: innings.nonStrikerId.toString()
+  };
+};
+
 export const startSecondInnings = async (input: StartSecondInningsInput) => {
   ensureObjectId(input.tenantId, 'Invalid tenant id.');
   ensureObjectId(input.matchId, 'Invalid match id.');
@@ -1396,6 +1779,14 @@ export const startSecondInnings = async (input: StartSecondInningsInput) => {
     ...(match.result ?? {}),
     targetRuns
   };
+  if (match.timeConfig?.splitByInnings) {
+    match.timer = {
+      ...(match.timer ?? {}),
+      status: 'IDLE',
+      accumulatedMs: 0,
+      lastResumedAt: null
+    };
+  }
   match.currentInningsId = innings._id;
   await match.save();
   invalidateCachedMatchScore(input.tenantId, input.matchId);
@@ -1886,6 +2277,19 @@ export const getMatchScore = async (
     await innings.save();
   }
 
+  const penaltyEvents = await ScoreEventModel.find({
+    tenantId,
+    matchId,
+    inningsId: innings._id,
+    type: 'penalty',
+    isUndone: false
+  }).select({ payload: 1 });
+  const penalties = penaltyEvents.reduce((total, event) => {
+    const payload = event.payload as { runs?: unknown } | undefined;
+    const runs = typeof payload?.runs === 'number' ? payload.runs : 0;
+    return total + runs;
+  }, 0);
+
   const response = {
     matchId: match._id.toString(),
     inningsId: innings._id.toString(),
@@ -1909,7 +2313,8 @@ export const getMatchScore = async (
       wides: wides ?? 0,
       noBalls: noBalls ?? 0,
       byes: byes ?? 0,
-      legByes: legByes ?? 0
+      legByes: legByes ?? 0,
+      penalties
     },
     current: {
       strikerId: strikerBatterId,
@@ -1927,6 +2332,11 @@ export const getMatchScore = async (
       ballsPerOver,
       oversPerInnings
     },
+    timeConfig: {
+      totalMatchMinutes: match.timeConfig?.totalMatchMinutes ?? null,
+      splitByInnings: Boolean(match.timeConfig?.splitByInnings)
+    },
+    timer: resolveTimerState(match, innings.inningsNumber),
     phase: match.phase ?? 'REGULAR',
     hasSuperOver: match.hasSuperOver ?? false,
     superOverStatus: match.superOverStatus ?? null,

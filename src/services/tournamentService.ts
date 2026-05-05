@@ -37,6 +37,7 @@ export type TournamentCreateInput = {
       totalMatches?: number;
       winsToClinch?: number;
     };
+    includeThirdPlaceMatch?: boolean;
   };
   stageStatus?: {
     league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -66,6 +67,7 @@ export type TournamentUpdateInput = {
       totalMatches?: number;
       winsToClinch?: number;
     };
+    includeThirdPlaceMatch?: boolean;
   };
   stageStatus?: {
     league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -97,6 +99,7 @@ type StandingRow = {
 };
 
 type KnockoutStage = 'R1' | 'QF' | 'SF' | 'FINAL';
+type MatchStageWithThird = KnockoutStage | 'THIRD_PLACE';
 type StatsSectionKey =
   | 'runs'
   | 'wickets'
@@ -212,6 +215,7 @@ const validateTournamentConfig = (
       totalMatches?: number | null;
       winsToClinch?: number | null;
     } | null;
+    includeThirdPlaceMatch?: boolean;
   }
 ) => {
   const qualificationCount = rules?.qualificationCount;
@@ -241,6 +245,13 @@ const validateTournamentConfig = (
         'tournament.invalid_rules'
       );
     }
+    if (rules?.includeThirdPlaceMatch !== undefined) {
+      throw new AppError(
+        'includeThirdPlaceMatch is not supported for SERIES tournaments.',
+        400,
+        'tournament.invalid_rules'
+      );
+    }
     return;
   }
 
@@ -256,6 +267,13 @@ const validateTournamentConfig = (
     if (qualificationCount !== undefined) {
       throw new AppError(
         'qualificationCount is supported only for LEAGUE_KNOCKOUT tournaments.',
+        400,
+        'tournament.invalid_rules'
+      );
+    }
+    if (rules?.includeThirdPlaceMatch !== undefined) {
+      throw new AppError(
+        'includeThirdPlaceMatch is supported only for LEAGUE_KNOCKOUT tournaments.',
         400,
         'tournament.invalid_rules'
       );
@@ -282,12 +300,27 @@ const validateTournamentConfig = (
       }
     );
   }
+
+  if (rules?.includeThirdPlaceMatch && normalized < 4) {
+    throw new AppError(
+      'includeThirdPlaceMatch requires qualificationCount to be 4.',
+      400,
+      'tournament.invalid_rules'
+    );
+  }
 };
 
 const oversFromBalls = (balls: number, ballsPerOver: number) => balls / ballsPerOver;
 
 const isKnockoutStage = (stage?: string | null): stage is KnockoutStage =>
   stage === 'R1' || stage === 'QF' || stage === 'SF' || stage === 'FINAL';
+
+const isMatchStageWithThird = (stage?: string | null): stage is MatchStageWithThird =>
+  stage === 'R1' ||
+  stage === 'QF' ||
+  stage === 'SF' ||
+  stage === 'FINAL' ||
+  stage === 'THIRD_PLACE';
 
 const resolveNextKnockoutStage = (winnerCount: number): KnockoutStage | null => {
   if (winnerCount > 8) return 'R1';
@@ -307,6 +340,7 @@ const buildTournamentOverviewDescription = (
       points?: { win?: number; tie?: number; noResult?: number; loss?: number };
       qualificationCount?: number;
       series?: { totalMatches?: number | null; winsToClinch?: number | null } | null;
+      includeThirdPlaceMatch?: boolean;
     };
     stageStatus?: {
       league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -349,6 +383,9 @@ const buildTournamentOverviewDescription = (
     parts.push(
       `Top ${tournament.rules?.qualificationCount ?? 4} teams qualify to knockout. Knockout stage is ${tournament.stageStatus?.knockout ?? 'PENDING'} (${counts.knockoutCompleted}/${counts.knockoutTotal} completed).`
     );
+    if (tournament.rules?.includeThirdPlaceMatch) {
+      parts.push('Semi-final losing teams will play a 3rd-place playoff.');
+    }
   }
 
   if (tournament.type === 'KNOCKOUT') {
@@ -384,6 +421,7 @@ const buildTournamentOverview = (
       points?: { win?: number; tie?: number; noResult?: number; loss?: number };
       qualificationCount?: number;
       series?: { totalMatches?: number | null; winsToClinch?: number | null } | null;
+      includeThirdPlaceMatch?: boolean;
     };
     stageStatus?: {
       league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -455,7 +493,11 @@ const buildTournamentOverview = (
               totalMatches: seriesRules.totalMatches,
               winsToClinch: seriesRules.winsToClinch
             }
-          : null
+          : null,
+      includeThirdPlaceMatch:
+        tournament.type === 'LEAGUE_KNOCKOUT'
+          ? (tournament.rules?.includeThirdPlaceMatch ?? false)
+          : false
     },
     tiePolicy:
       tournament.type === 'LEAGUE' || tournament.type === 'SERIES'
@@ -646,6 +688,10 @@ export const createTournament = async (input: TournamentCreateInput) => {
               totalMatches: seriesRules.totalMatches,
               winsToClinch: seriesRules.winsToClinch
             }
+          : undefined,
+      includeThirdPlaceMatch:
+        input.type === 'LEAGUE_KNOCKOUT'
+          ? (input.rules?.includeThirdPlaceMatch ?? false)
           : undefined
     },
     stageStatus: {
@@ -694,6 +740,10 @@ export const duplicateTournament = async (input: DuplicateTournamentInput) => {
               totalMatches: sourceTournament.rules?.series?.totalMatches ?? 3,
               winsToClinch: sourceTournament.rules?.series?.winsToClinch ?? 2
             }
+          : undefined,
+      includeThirdPlaceMatch:
+        sourceTournament.type === 'LEAGUE_KNOCKOUT'
+          ? sourceTournament.rules?.includeThirdPlaceMatch ?? false
           : undefined
     },
     stageStatus: {
@@ -1623,7 +1673,7 @@ export const generateKnockoutFromLeague = async (tenantId: string, id: string) =
 
   const existingKnockout = await scopedFindOne(MatchModel, tenantId, {
     tournamentId: id,
-    stage: { $in: ['R1', 'QF', 'SF', 'FINAL'] }
+    stage: { $in: ['R1', 'QF', 'SF', 'FINAL', 'THIRD_PLACE'] }
   });
   if (existingKnockout) {
     throw new AppError('Knockout matches already exist.', 409, 'match.already_exists');
@@ -1681,12 +1731,15 @@ export const generateKnockoutFromLeague = async (tenantId: string, id: string) =
     tournamentId: string;
     teamAId: string;
     teamBId: string;
-    stage: 'SF' | 'FINAL';
+    stage: 'SF' | 'FINAL' | 'THIRD_PLACE';
     status: 'SCHEDULED';
     roundNumber: number;
   }> = [];
 
-  if (qualificationCount >= 4) {
+  const hasSemis = qualificationCount >= 4 && rows.length > 4;
+  const includeThirdPlaceMatch = tournament.rules?.includeThirdPlaceMatch ?? false;
+
+  if (hasSemis) {
     matchesToCreate.push(
       {
         tenantId,
@@ -1707,6 +1760,27 @@ export const generateKnockoutFromLeague = async (tenantId: string, id: string) =
         roundNumber: 1
       }
     );
+  } else if (qualificationCount >= 4) {
+    matchesToCreate.push({
+      tenantId,
+      tournamentId: id,
+      teamAId: top[0].teamId,
+      teamBId: top[1].teamId,
+      stage: 'FINAL',
+      status: 'SCHEDULED',
+      roundNumber: 1
+    });
+    if (includeThirdPlaceMatch) {
+      matchesToCreate.push({
+        tenantId,
+        tournamentId: id,
+        teamAId: top[2].teamId,
+        teamBId: top[3].teamId,
+        stage: 'THIRD_PLACE',
+        status: 'SCHEDULED',
+        roundNumber: 1
+      });
+    }
   } else {
     matchesToCreate.push({
       tenantId,
@@ -1754,11 +1828,11 @@ export const getTournamentById = async (tenantId: string, id: string) => {
       MatchModel.countDocuments({ tenantId, tournamentId: id, status: 'COMPLETED' }),
       MatchModel.countDocuments({ tenantId, tournamentId: id, stage: 'LEAGUE' }),
       MatchModel.countDocuments({ tenantId, tournamentId: id, stage: 'LEAGUE', status: 'COMPLETED' }),
-      MatchModel.countDocuments({ tenantId, tournamentId: id, stage: { $in: ['R1', 'QF', 'SF', 'FINAL'] } }),
+      MatchModel.countDocuments({ tenantId, tournamentId: id, stage: { $in: ['R1', 'QF', 'SF', 'FINAL', 'THIRD_PLACE'] } }),
       MatchModel.countDocuments({
         tenantId,
         tournamentId: id,
-        stage: { $in: ['R1', 'QF', 'SF', 'FINAL'] },
+        stage: { $in: ['R1', 'QF', 'SF', 'FINAL', 'THIRD_PLACE'] },
         status: 'COMPLETED'
       })
     ]);
@@ -1871,7 +1945,9 @@ export const updateTournament = async (
         updates.rules?.series?.totalMatches ?? tournament.rules?.series?.totalMatches ?? 3,
       winsToClinch:
         updates.rules?.series?.winsToClinch ?? tournament.rules?.series?.winsToClinch ?? 2
-    }
+    },
+    includeThirdPlaceMatch:
+      updates.rules?.includeThirdPlaceMatch ?? tournament.rules?.includeThirdPlaceMatch ?? false
   };
 
   validateTournamentConfig(nextType, {
@@ -1880,7 +1956,11 @@ export const updateTournament = async (
     series:
       nextType === 'SERIES'
         ? mergedRules.series
-        : updates.rules?.series
+        : updates.rules?.series,
+    includeThirdPlaceMatch:
+      nextType === 'LEAGUE_KNOCKOUT'
+        ? mergedRules.includeThirdPlaceMatch
+        : updates.rules?.includeThirdPlaceMatch
   });
 
   if (nextType === 'LEAGUE_KNOCKOUT' && mergedRules.qualificationCount !== undefined) {
@@ -1934,7 +2014,11 @@ export const updateTournament = async (
               totalMatches: Number(mergedRules.series.totalMatches ?? 3),
               winsToClinch: Number(mergedRules.series.winsToClinch ?? 2)
             }
-          : undefined
+          : undefined,
+      includeThirdPlaceMatch:
+        nextType === 'LEAGUE_KNOCKOUT'
+          ? (mergedRules.includeThirdPlaceMatch ?? false)
+          : false
     };
   }
   if (updates.type !== undefined && updates.rules === undefined) {
@@ -1951,7 +2035,11 @@ export const updateTournament = async (
               totalMatches: Number(mergedRules.series.totalMatches ?? 3),
               winsToClinch: Number(mergedRules.series.winsToClinch ?? 2)
             }
-          : undefined
+          : undefined,
+      includeThirdPlaceMatch:
+        nextType === 'LEAGUE_KNOCKOUT'
+          ? (mergedRules.includeThirdPlaceMatch ?? false)
+          : false
     };
   }
   if (updates.stageStatus !== undefined) {
@@ -2066,15 +2154,15 @@ export const syncKnockoutProgression = async (
   }
 
   if (tournament.type !== 'KNOCKOUT' && tournament.type !== 'LEAGUE_KNOCKOUT') {
-    return { created: 0, stage: null as KnockoutStage | null, roundNumber: null as number | null };
+    return { created: 0, stage: null as MatchStageWithThird | null, roundNumber: null as number | null };
   }
 
   const completedMatch = await scopedFindOne(MatchModel, tenantId, {
     _id: completedMatchId,
     tournamentId
   });
-  if (!completedMatch || !isKnockoutStage(completedMatch.stage)) {
-    return { created: 0, stage: null as KnockoutStage | null, roundNumber: null as number | null };
+  if (!completedMatch || !isMatchStageWithThird(completedMatch.stage)) {
+    return { created: 0, stage: null as MatchStageWithThird | null, roundNumber: null as number | null };
   }
 
   const stage = completedMatch.stage;
@@ -2102,7 +2190,44 @@ export const syncKnockoutProgression = async (
     return { created: 0, stage, roundNumber };
   }
 
+  if (stage === 'THIRD_PLACE') {
+    const pendingFinal = await scopedFindOne(MatchModel, tenantId, {
+      tournamentId,
+      stage: 'FINAL',
+      status: { $ne: 'COMPLETED' }
+    });
+    if (!pendingFinal) {
+      tournament.status = 'COMPLETED';
+      tournament.stageStatus = {
+        league: tournament.type === 'KNOCKOUT' ? 'PENDING' : 'COMPLETED',
+        knockout: 'COMPLETED'
+      };
+      await tournament.save();
+    }
+    return { created: 0, stage, roundNumber };
+  }
+
   if (stage === 'FINAL' || winnerTeamIds.length === 1) {
+    const needsThirdPlaceCompletion =
+      stage === 'FINAL' &&
+      tournament.type === 'LEAGUE_KNOCKOUT' &&
+      (tournament.rules?.includeThirdPlaceMatch ?? false);
+    if (needsThirdPlaceCompletion) {
+      const pendingThirdPlace = await scopedFindOne(MatchModel, tenantId, {
+        tournamentId,
+        stage: 'THIRD_PLACE',
+        status: { $ne: 'COMPLETED' }
+      });
+      if (pendingThirdPlace) {
+        tournament.stageStatus = {
+          league: tournament.type === 'KNOCKOUT' ? 'PENDING' : 'COMPLETED',
+          knockout: 'ACTIVE'
+        };
+        await tournament.save();
+        return { created: 0, stage, roundNumber };
+      }
+    }
+
     tournament.status = 'COMPLETED';
     tournament.stageStatus = {
       league: tournament.type === 'KNOCKOUT' ? 'PENDING' : 'COMPLETED',
@@ -2132,7 +2257,7 @@ export const syncKnockoutProgression = async (
     tournamentId: string;
     teamAId: string;
     teamBId?: string | null;
-    stage: KnockoutStage;
+    stage: MatchStageWithThird;
     roundNumber: number;
     status: 'SCHEDULED' | 'COMPLETED';
     result?: {
@@ -2172,6 +2297,42 @@ export const syncKnockoutProgression = async (
       roundNumber: nextRoundNumber,
       status: 'SCHEDULED'
     });
+  }
+
+  if (
+    tournament.type === 'LEAGUE_KNOCKOUT' &&
+    stage === 'SF' &&
+    (tournament.rules?.includeThirdPlaceMatch ?? false) &&
+    stageMatches.length === 2
+  ) {
+    const losers = stageMatches
+      .map((entry) => {
+        const winnerId = entry.result?.winnerTeamId?.toString();
+        const teamAId = entry.teamAId.toString();
+        const teamBId = entry.teamBId?.toString();
+        if (!winnerId || !teamBId) return null;
+        return winnerId === teamAId ? teamBId : teamAId;
+      })
+      .filter((id): id is string => Boolean(id));
+
+    if (losers.length === 2) {
+      const existingThirdPlace = await scopedFindOne(MatchModel, tenantId, {
+        tournamentId,
+        stage: 'THIRD_PLACE',
+        roundNumber: nextRoundNumber
+      });
+      if (!existingThirdPlace) {
+        matchesToCreate.push({
+          tenantId,
+          tournamentId,
+          teamAId: losers[0],
+          teamBId: losers[1],
+          stage: 'THIRD_PLACE',
+          roundNumber: nextRoundNumber,
+          status: 'SCHEDULED'
+        });
+      }
+    }
   }
 
   if (matchesToCreate.length > 0) {

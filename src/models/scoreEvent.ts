@@ -23,7 +23,7 @@ const scoreEventSchema = new Schema(
     },
     type: {
       type: String,
-      enum: ['run', 'extra', 'wicket', 'swap', 'retire', 'undo'],
+      enum: ['run', 'extra', 'wicket', 'swap', 'retire', 'penalty', 'undo'],
       required: true
     },
     payload: {
@@ -59,6 +59,21 @@ const scoreEventSchema = new Schema(
     createdByUserId: {
       type: String,
       required: true
+    },
+    audit: {
+      source: {
+        type: String,
+        default: 'scoring_panel'
+      },
+      action: {
+        type: String
+      },
+      note: {
+        type: String
+      },
+      targetEventSeq: {
+        type: Number
+      }
     }
   },
   {

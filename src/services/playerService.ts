@@ -13,6 +13,7 @@ export type PlayerCreateInput = {
   battingStyle?: BattingStyle;
   bowlingStyle?: BowlingStyle;
   isWicketKeeper?: boolean;
+  defaultInSquad?: boolean;
 };
 
 export type PlayerUpdateInput = {
@@ -21,6 +22,7 @@ export type PlayerUpdateInput = {
   battingStyle?: BattingStyle;
   bowlingStyle?: BowlingStyle;
   isWicketKeeper?: boolean;
+  defaultInSquad?: boolean;
 };
 
 const ensureObjectId = (id: string, message: string) => {
@@ -52,7 +54,8 @@ export const createPlayer = async (input: PlayerCreateInput) => {
     jerseyNumber: input.jerseyNumber,
     battingStyle: input.battingStyle,
     bowlingStyle: input.bowlingStyle,
-    isWicketKeeper: input.isWicketKeeper ?? false
+    isWicketKeeper: input.isWicketKeeper ?? false,
+    defaultInSquad: input.defaultInSquad ?? false
   });
 
   return player;
@@ -95,6 +98,7 @@ export const updatePlayer = async (tenantId: string, id: string, updates: Player
   if (updates.battingStyle !== undefined) player.battingStyle = updates.battingStyle;
   if (updates.bowlingStyle !== undefined) player.bowlingStyle = updates.bowlingStyle;
   if (updates.isWicketKeeper !== undefined) player.isWicketKeeper = updates.isWicketKeeper;
+  if (updates.defaultInSquad !== undefined) player.defaultInSquad = updates.defaultInSquad;
 
   await player.save();
   return player;

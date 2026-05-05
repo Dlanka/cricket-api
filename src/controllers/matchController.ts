@@ -4,6 +4,7 @@ import { ok } from '../utils/apiResponse';
 import { AppError } from '../utils/appError';
 import {
   changeCurrentBowler,
+  changeOnFieldBatters,
   getAvailableNextBatters,
   generateFixtures,
   getMatchById,
@@ -16,7 +17,11 @@ import {
   startSuperOver,
   startMatch,
   startSecondInnings,
-  updateMatchConfig
+  startMatchTimer,
+  pauseMatchTimer,
+  resumeMatchTimer,
+  updateMatchConfig,
+  updateMatchTimeConfig
 } from '../services/matchService';
 
 const tournamentIdSchema = z.object({
@@ -37,6 +42,12 @@ const startMatchSchema = z.object({
 
 const changeBowlerSchema = z.object({
   bowlerId: z.string().min(1)
+});
+
+const changeBattersSchema = z.object({
+  strikerId: z.string().min(1),
+  nonStrikerId: z.string().min(1),
+  transferStats: z.coerce.boolean().optional()
 });
 
 const startSecondInningsSchema = z.object({
@@ -81,6 +92,15 @@ const updateMatchConfigSchema = z
     ballsPerOver: z.coerce.number().int().min(1).optional()
   })
   .refine((data) => data.oversPerInnings !== undefined || data.ballsPerOver !== undefined, {
+    message: 'At least one field must be provided.'
+  });
+
+const updateMatchTimeConfigSchema = z
+  .object({
+    totalMatchMinutes: z.coerce.number().int().min(1).optional(),
+    splitByInnings: z.coerce.boolean().optional()
+  })
+  .refine((data) => data.totalMatchMinutes !== undefined || data.splitByInnings !== undefined, {
     message: 'At least one field must be provided.'
   });
 
@@ -214,6 +234,28 @@ export const changeCurrentBowlerHandler = async (
   }
 };
 
+export const changeOnFieldBattersHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const { strikerId, nonStrikerId, transferStats } = changeBattersSchema.parse(req.body);
+    const tenantId = getTenantId(req);
+    const result = await changeOnFieldBatters({
+      tenantId,
+      matchId,
+      strikerId,
+      nonStrikerId,
+      transferStats
+    });
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const setMatchTossHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { matchId } = matchIdSchema.parse(req.params);
@@ -251,6 +293,55 @@ export const updateMatchConfigHandler = async (
     const payload = updateMatchConfigSchema.parse(req.body);
     const tenantId = getTenantId(req);
     const result = await updateMatchConfig({ tenantId, matchId, ...payload });
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const updateMatchTimeConfigHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const payload = updateMatchTimeConfigSchema.parse(req.body);
+    const tenantId = getTenantId(req);
+    const result = await updateMatchTimeConfig({ tenantId, matchId, ...payload });
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const startMatchTimerHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const tenantId = getTenantId(req);
+    const result = await startMatchTimer(tenantId, matchId);
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const pauseMatchTimerHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const tenantId = getTenantId(req);
+    const result = await pauseMatchTimer(tenantId, matchId);
+    return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const resumeMatchTimerHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { matchId } = matchIdSchema.parse(req.params);
+    const tenantId = getTenantId(req);
+    const result = await resumeMatchTimer(tenantId, matchId);
     return res.status(200).json(ok(result));
   } catch (error) {
     return next(error);

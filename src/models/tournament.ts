@@ -57,6 +57,10 @@ const tournamentRulesSchema = new Schema(
         type: Number,
         min: 1
       }
+    },
+    includeThirdPlaceMatch: {
+      type: Boolean,
+      default: false
     }
   },
   {

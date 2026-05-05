@@ -11,6 +11,7 @@ import { getCachedInningsRead, setCachedInningsRead } from './utils/scoringReadC
 type BattersReadResponse = {
   items: Array<{
     batterId: string;
+    playerId: string | null;
     name: string;
     runs: number;
     balls: number;
@@ -137,6 +138,13 @@ const deriveSummary = (event: {
     return 'Retire';
   }
 
+  if (event.type === 'penalty') {
+    const runs = Number(payload.runs ?? 0);
+    if (runs > 0) return `P+${runs}`;
+    if (runs < 0) return `P${runs}`;
+    return 'Penalty';
+  }
+
   return 'Undo';
 };
 
@@ -152,6 +160,10 @@ const deriveIsLegal = (event: { isLegal?: boolean; type: string; payload?: Recor
   if (event.type === 'extra') {
     const extraType = event.payload?.extraType as string | undefined;
     return extraType === 'byes' || extraType === 'legByes';
+  }
+
+  if (event.type === 'penalty') {
+    return false;
   }
 
   return false;
@@ -177,6 +189,10 @@ const deriveRuns = (event: { type: string; payload?: Record<string, unknown> }) 
 
   if (event.type === 'wicket') {
     return Number(payload.runsWithWicket ?? 0);
+  }
+
+  if (event.type === 'penalty') {
+    return Number(payload.runs ?? 0);
   }
 
   return 0;
@@ -213,6 +229,7 @@ export const getBattersForInnings = async (
   const result = {
     items: items.map((entry) => ({
       batterId: entry._id.toString(),
+      playerId: entry.playerRef?.playerId?.toString() ?? null,
       name: entry.playerRef?.name ?? entry.batterKey?.name ?? 'Unknown',
       runs: entry.runs,
       balls: entry.balls,

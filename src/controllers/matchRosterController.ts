@@ -12,8 +12,7 @@ const rosterSchema = z.object({
   teamId: z.string().min(1),
   playingPlayerIds: z
     .array(z.string().min(1))
-    .min(1, 'At least 1 player must be selected.')
-    .max(11, 'At most 11 players can be selected.'),
+    .min(1, 'At least 1 player must be selected.'),
   captainId: z.string().min(1).optional(),
   keeperId: z.string().min(1).optional()
 });

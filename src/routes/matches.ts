@@ -3,6 +3,7 @@ import { requireAuthApp } from '../middleware/requireAuthApp';
 import { requireAction } from '../middleware/requireAction';
 import {
   changeCurrentBowlerHandler,
+  changeOnFieldBattersHandler,
   getAvailableNextBattersHandler,
   getTournamentFixturesBracketHandler,
   getTournamentFixturesViewHandler,
@@ -12,12 +13,19 @@ import {
   listMatchesHandler,
   resolveMatchTieHandler,
   setMatchTossHandler,
+  pauseMatchTimerHandler,
+  resumeMatchTimerHandler,
+  startMatchTimerHandler,
   startSuperOverHandler,
   startMatchHandler,
   startSecondInningsHandler,
-  updateMatchConfigHandler
+  updateMatchConfigHandler,
+  updateMatchTimeConfigHandler
 } from '../controllers/matchController';
-import { getMatchSummaryHandler } from '../controllers/getMatchSummary.controller';
+import {
+  getMatchPlayerOfMatchHandler,
+  getMatchSummaryHandler
+} from '../controllers/getMatchSummary.controller';
 import { scoreMatchEventHandler } from '../controllers/scoreEventController';
 
 export const matchRoutes = Router();
@@ -54,6 +62,12 @@ matchRoutes.patch(
   requireAction('tournament.manage'),
   updateMatchConfigHandler
 );
+matchRoutes.patch(
+  '/matches/:matchId/time-config',
+  requireAuthApp,
+  requireAction('tournament.manage'),
+  updateMatchTimeConfigHandler
+);
 
 matchRoutes.post(
   '/matches/:matchId/start',
@@ -78,12 +92,23 @@ matchRoutes.post(
 
 matchRoutes.get('/matches/:matchId/score', requireAuthApp, getMatchScoreHandler);
 matchRoutes.get('/matches/:matchId/summary', requireAuthApp, getMatchSummaryHandler);
+matchRoutes.get('/matches/:matchId/awards/player-of-match', requireAuthApp, getMatchPlayerOfMatchHandler);
+matchRoutes.post('/matches/:matchId/timer/start', requireAuthApp, requireAction('match.start'), startMatchTimerHandler);
+matchRoutes.post('/matches/:matchId/timer/pause', requireAuthApp, requireAction('match.start'), pauseMatchTimerHandler);
+matchRoutes.post('/matches/:matchId/timer/resume', requireAuthApp, requireAction('match.start'), resumeMatchTimerHandler);
 
 matchRoutes.patch(
   '/matches/:matchId/current-bowler',
   requireAuthApp,
   requireAction('bowler.change'),
   changeCurrentBowlerHandler
+);
+
+matchRoutes.patch(
+  '/matches/:matchId/current-batters',
+  requireAuthApp,
+  requireAction('score.write'),
+  changeOnFieldBattersHandler
 );
 
 matchRoutes.patch(

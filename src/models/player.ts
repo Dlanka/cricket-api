@@ -34,6 +34,10 @@ const playerSchema = new Schema(
     isWicketKeeper: {
       type: Boolean,
       default: false
+    },
+    defaultInSquad: {
+      type: Boolean,
+      default: false
     }
   },
   {

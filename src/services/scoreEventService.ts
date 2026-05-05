@@ -23,8 +23,9 @@ type ScoreEventInput = {
   tenantId: string;
   matchId: string;
   createdByUserId: string;
-  type: 'run' | 'extra' | 'wicket' | 'swap' | 'retire' | 'undo';
+  type: 'run' | 'extra' | 'wicket' | 'swap' | 'retire' | 'penalty' | 'undo' | 'correctBall';
   runs?: 0 | 1 | 2 | 3 | 4 | 6;
+  penaltyRuns?: number;
   extraType?: 'wide' | 'noBall' | 'byes' | 'legByes' | 'none';
   additionalRuns?: number;
   wicketType?:
@@ -42,6 +43,26 @@ type ScoreEventInput = {
   runsWithWicket?: 0 | 1 | 2 | 3 | 4 | 5 | 6;
   retiringBatter?: 'striker' | 'nonStriker';
   reason?: string;
+  targetSeq?: number;
+  replacement?: {
+    type: 'run' | 'extra' | 'wicket';
+    runs?: 0 | 1 | 2 | 3 | 4 | 6;
+    extraType?: 'wide' | 'noBall' | 'byes' | 'legByes' | 'none';
+    additionalRuns?: number;
+    wicketType?:
+      | 'bowled'
+      | 'caught'
+      | 'lbw'
+      | 'stumping'
+      | 'hitWicket'
+      | 'runOut'
+      | 'obstructingField';
+    newBatterId?: string;
+    newBatterName?: string;
+    fielderId?: string;
+    runOutBatsman?: 'striker' | 'nonStriker';
+    runsWithWicket?: 0 | 1 | 2 | 3 | 4 | 5 | 6;
+  };
 };
 
 type Snapshot = {
@@ -124,7 +145,7 @@ const getMaxLegalBalls = (innings: any, ballsPerOver: number) =>
 const COMPLETED_MATCH_UNDO_WINDOW_MS = 30 * 60 * 1000;
 
 const isKnockoutStage = (stage?: string | null) =>
-  stage === 'R1' || stage === 'QF' || stage === 'SF' || stage === 'FINAL';
+  stage === 'R1' || stage === 'QF' || stage === 'SF' || stage === 'THIRD_PLACE' || stage === 'FINAL';
 
 const ensureLiveContext = async (
   tenantId: string,
@@ -425,6 +446,25 @@ const buildSnapshotFromState = (
   };
 };
 
+const loadAllInningsBatters = async (tenantId: string, inningsId: string) =>
+  InningsBatterModel.find({ tenantId, inningsId }).select({
+    _id: 1,
+    tenantId: 1,
+    inningsId: 1,
+    playerRef: 1,
+    batterKey: 1,
+    runs: 1,
+    balls: 1,
+    fours: 1,
+    sixes: 1,
+    isOut: 1,
+    outKind: 1,
+    outFielderId: 1,
+    outFielderName: 1,
+    outBowlerId: 1,
+    outBowlerName: 1
+  });
+
 const restoreSnapshot = async (tenantId: string, innings: any, snapshot: Snapshot) => {
   innings.runs = snapshot.innings.runs;
   innings.wickets = snapshot.innings.wickets;
@@ -444,32 +484,73 @@ const restoreSnapshot = async (tenantId: string, innings: any, snapshot: Snapsho
     balls: snapshot.innings.currentOver.balls
   };
 
-  if (snapshot.batters.length > 0) {
-    const batterOps = snapshot.batters.map((b) => ({
-        updateOne: {
-          filter: { _id: b.id, tenantId, inningsId: innings._id },
-          update: {
-            $set: {
-              tenantId,
-              inningsId: innings._id,
-              batterKey: { playerId: b.playerRef.playerId, name: b.playerRef.name },
-              playerRef: { playerId: b.playerRef.playerId, name: b.playerRef.name },
-              runs: b.runs,
-              balls: b.balls,
-              fours: b.fours,
-              sixes: b.sixes,
-              isOut: b.isOut,
-              outKind: b.outKind,
-              outFielderId: b.outFielderId,
-              outFielderName: b.outFielderName,
-              outBowlerId: b.outBowlerId,
-              outBowlerName: b.outBowlerName
-            }
-          },
-          upsert: true
-        }
-      })) as any;
-    await InningsBatterModel.bulkWrite(batterOps);
+  // Some historical events have partial batter snapshots (typically only on-field batters).
+  // Preserve already-dismissed batter rows that are missing from snapshot so undo does not
+  // accidentally drop them from scorecards.
+  const existingBatters = await InningsBatterModel.find({
+    tenantId,
+    inningsId: innings._id
+  }).select({
+    _id: 1,
+    playerRef: 1,
+    batterKey: 1,
+    runs: 1,
+    balls: 1,
+    fours: 1,
+    sixes: 1,
+    isOut: 1,
+    outKind: 1,
+    outFielderId: 1,
+    outFielderName: 1,
+    outBowlerId: 1,
+    outBowlerName: 1
+  });
+
+  const snapshotBatterIds = new Set(snapshot.batters.map((b) => b.id));
+  const preservedDismissedBatters = existingBatters
+    .filter((entry) => entry.isOut && !snapshotBatterIds.has(entry._id.toString()))
+    .map((entry) => ({
+      id: entry._id.toString(),
+      playerRef: {
+        playerId: entry.playerRef?.playerId?.toString() ?? entry.batterKey?.playerId?.toString(),
+        name: entry.playerRef?.name ?? entry.batterKey?.name ?? ''
+      },
+      runs: entry.runs,
+      balls: entry.balls,
+      fours: entry.fours,
+      sixes: entry.sixes,
+      isOut: entry.isOut,
+      outKind: entry.outKind,
+      outFielderId: entry.outFielderId?.toString(),
+      outFielderName: entry.outFielderName,
+      outBowlerId: entry.outBowlerId?.toString(),
+      outBowlerName: entry.outBowlerName
+    }));
+
+  const mergedBatters = [...snapshot.batters, ...preservedDismissedBatters];
+
+  // Replace batter state atomically from merged snapshot.
+  await InningsBatterModel.deleteMany({ tenantId, inningsId: innings._id });
+  if (mergedBatters.length > 0) {
+    await InningsBatterModel.insertMany(
+      mergedBatters.map((b) => ({
+        _id: b.id,
+        tenantId,
+        inningsId: innings._id,
+        batterKey: { playerId: b.playerRef.playerId, name: b.playerRef.name },
+        playerRef: { playerId: b.playerRef.playerId, name: b.playerRef.name },
+        runs: b.runs,
+        balls: b.balls,
+        fours: b.fours,
+        sixes: b.sixes,
+        isOut: b.isOut,
+        outKind: b.outKind,
+        outFielderId: b.outFielderId,
+        outFielderName: b.outFielderName,
+        outBowlerId: b.outBowlerId,
+        outBowlerName: b.outBowlerName
+      }))
+    );
   }
 
   if (snapshot.bowler) {
@@ -518,6 +599,11 @@ const buildPayload = (input: ScoreEventInput, createdBatterStatId?: string) => {
     payload.retiringBatter = input.retiringBatter;
     payload.newBatterId = input.newBatterId;
     payload.newBatterName = input.newBatterName;
+    payload.reason = input.reason;
+  }
+
+  if (input.type === 'penalty') {
+    payload.runs = input.penaltyRuns ?? 0;
     payload.reason = input.reason;
   }
 
@@ -588,7 +674,71 @@ const buildEventMeta = (input: ScoreEventInput) => {
     return { isLegal: false, summaryDisplay: 'Retire' };
   }
 
+  if (input.type === 'penalty') {
+    return {
+      isLegal: false,
+      summaryDisplay:
+        (input.penaltyRuns ?? 0) >= 0
+          ? `P+${input.penaltyRuns ?? 0}`
+          : `P${input.penaltyRuns ?? 0}`
+    };
+  }
+
   return { isLegal: false, summaryDisplay: 'Undo' };
+};
+
+const isActiveScoreEvent = (event: { isUndone?: boolean; undoneAt?: Date | null }) =>
+  event.isUndone !== true && !event.undoneAt;
+
+const isDeliveryEvent = (event: { type: string }) =>
+  event.type === 'run' || event.type === 'extra' || event.type === 'wicket';
+
+const mapEventDocToReplayInput = (event: {
+  type: string;
+  payload?: Record<string, unknown>;
+}): ScoreEventInput => {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  if (event.type === 'run') {
+    return {
+      tenantId: '',
+      matchId: '',
+      createdByUserId: '',
+      type: 'run',
+      runs: Number(payload.runs ?? 0) as 0 | 1 | 2 | 3 | 4 | 6
+    };
+  }
+
+  if (event.type === 'extra') {
+    return {
+      tenantId: '',
+      matchId: '',
+      createdByUserId: '',
+      type: 'extra',
+      extraType: (payload.extraType as 'wide' | 'noBall' | 'byes' | 'legByes') ?? 'byes',
+      additionalRuns: Number(payload.additionalRuns ?? 0)
+    };
+  }
+
+  return {
+    tenantId: '',
+    matchId: '',
+    createdByUserId: '',
+    type: 'wicket',
+    wicketType: payload.wicketType as
+      | 'bowled'
+      | 'caught'
+      | 'lbw'
+      | 'stumping'
+      | 'hitWicket'
+      | 'runOut'
+      | 'obstructingField',
+    extraType: (payload.extraType as 'wide' | 'noBall' | 'none') ?? 'none',
+    newBatterId: payload.newBatterId as string | undefined,
+    newBatterName: payload.newBatterName as string | undefined,
+    fielderId: payload.fielderId as string | undefined,
+    runOutBatsman: payload.runOutBatsman as 'striker' | 'nonStriker' | undefined,
+    runsWithWicket: Number(payload.runsWithWicket ?? 0) as 0 | 1 | 2 | 3 | 4 | 5 | 6
+  };
 };
 
 const createNamedBatter = async (tenantId: string, inningsId: string, name: string) =>
@@ -678,18 +828,19 @@ const applyUndo = async (input: ScoreEventInput) => {
   }
 
   if (match.status === 'COMPLETED' && isKnockoutStage(match.stage)) {
-    const stageRank: Record<'R1' | 'QF' | 'SF' | 'FINAL', number> = {
+    const stageRank: Record<'R1' | 'QF' | 'SF' | 'THIRD_PLACE' | 'FINAL', number> = {
       R1: 1,
       QF: 2,
       SF: 3,
-      FINAL: 4
+      THIRD_PLACE: 4,
+      FINAL: 5
     };
     const thisRound = match.roundNumber ?? 1;
     const thisStageRank = stageRank[match.stage];
     const progressedKnockoutMatches = await scopedFind(MatchModel, input.tenantId, {
       tournamentId: match.tournamentId,
       _id: { $ne: match._id },
-      stage: { $in: ['R1', 'QF', 'SF', 'FINAL'] },
+      stage: { $in: ['R1', 'QF', 'SF', 'THIRD_PLACE', 'FINAL'] },
       status: { $in: ['LIVE', 'COMPLETED'] }
     }).select({ stage: 1, roundNumber: 1 });
 
@@ -832,6 +983,11 @@ const applyUndo = async (input: ScoreEventInput) => {
       targetEventId: target._id.toString(),
       targetSeq: target.seq
     },
+    audit: {
+      source: 'scoring_panel',
+      action: 'undo',
+      targetEventSeq: target.seq
+    },
     // For undo of latest event, current state should be target.afterSnapshot.
     // Reusing avoids an additional read-heavy snapshot capture in hot path.
     beforeSnapshot: after,
@@ -901,6 +1057,182 @@ const validateWicketExtraCombination = (wicketType: string, extraType: string) =
   }
 };
 
+const applyCorrectBall = async (input: ScoreEventInput) => {
+  const targetSeq = Number(input.targetSeq ?? 0);
+  if (!Number.isInteger(targetSeq) || targetSeq <= 0) {
+    throw new AppError('targetSeq is required for ball correction.', 400, 'score.correction_invalid');
+  }
+
+  if (!input.replacement) {
+    throw new AppError('replacement is required for ball correction.', 400, 'score.correction_invalid');
+  }
+
+  const replacement = input.replacement;
+  if (!['run', 'extra', 'wicket'].includes(replacement.type)) {
+    throw new AppError('Invalid replacement type for ball correction.', 400, 'score.correction_invalid');
+  }
+
+  const context = await ensureLiveContext(input.tenantId, input.matchId, false, false);
+  ensureCurrentOver(context.innings);
+
+  const overBalls = Array.isArray(context.innings.currentOver?.balls)
+    ? (context.innings.currentOver.balls as Array<{ seq?: number }>)
+    : [];
+  let overSeqs = overBalls
+    .map((entry) => Number(entry.seq))
+    .filter((entry) => Number.isFinite(entry))
+    .map((entry) => Number(entry));
+
+  // After an over boundary, currentOver can be reset/empty before next legal delivery.
+  // In that state, allow correcting balls from the latest completed over.
+  if (overSeqs.length === 0 && context.innings.balls > 0) {
+    const fetchLimit = Math.max(context.ballsPerOver * 8, 48);
+    const recentEvents = await ScoreEventModel.find({
+      tenantId: input.tenantId,
+      inningsId: context.innings._id,
+      isUndone: { $ne: true },
+      $or: [{ undoneAt: null }, { undoneAt: { $exists: false } }]
+    })
+      .select({ seq: 1, type: 1, payload: 1, isLegal: 1 })
+      .sort({ seq: -1 })
+      .limit(fetchLimit)
+      .lean();
+
+    let legalRemaining = context.innings.balls;
+    const seqsByOver = new Map<number, number[]>();
+
+    for (const event of recentEvents) {
+      const eventPayload = (event.payload ?? {}) as Record<string, unknown>;
+      const eventExtraType = eventPayload.extraType as string | undefined;
+      const isLegal =
+        typeof event.isLegal === 'boolean'
+          ? event.isLegal
+          : event.type === 'run' || event.type === 'wicket'
+            ? true
+            : event.type === 'extra'
+              ? eventExtraType === 'byes' || eventExtraType === 'legByes'
+              : false;
+      const overNumber =
+        legalRemaining > 0 ? Math.floor((legalRemaining - 1) / context.ballsPerOver) : 0;
+      const isDelivery =
+        event.type === 'run' || event.type === 'extra' || event.type === 'wicket';
+      if (isDelivery) {
+        const list = seqsByOver.get(overNumber) ?? [];
+        list.unshift(event.seq);
+        seqsByOver.set(overNumber, list);
+      }
+
+      if (isLegal && legalRemaining > 0) {
+        legalRemaining -= 1;
+      }
+    }
+
+    const latestCompletedOverNumber = Math.floor(
+      Math.max(0, context.innings.balls - 1) / context.ballsPerOver
+    );
+    overSeqs = seqsByOver.get(latestCompletedOverNumber) ?? [];
+  }
+
+  if (!overSeqs.includes(targetSeq)) {
+    throw new AppError('Target ball is not in current over.', 409, 'score.correction_target_invalid');
+  }
+
+  const latestOverSeq = overSeqs[overSeqs.length - 1] ?? targetSeq;
+  const trailingEventsRaw = await ScoreEventModel.find({
+    tenantId: input.tenantId,
+    inningsId: context.innings._id,
+    seq: { $gt: latestOverSeq },
+    isUndone: { $ne: true },
+    $or: [{ undoneAt: null }, { undoneAt: { $exists: false } }]
+  })
+    .sort({ seq: 1 })
+    .select({ seq: 1, type: 1, payload: 1, isUndone: 1, undoneAt: 1 });
+  const trailingEvents = trailingEventsRaw.filter((event) => isActiveScoreEvent(event));
+  if (trailingEvents.some((event) => isDeliveryEvent(event))) {
+    throw new AppError(
+      'Cannot correct ball after newer delivery events in another over.',
+      409,
+      'score.correction_blocked'
+    );
+  }
+
+  const rollbackSeqs = overSeqs.filter((seq) => seq >= targetSeq);
+  const rollbackEventsRaw = await ScoreEventModel.find({
+    tenantId: input.tenantId,
+    inningsId: context.innings._id,
+    seq: { $in: rollbackSeqs },
+    isUndone: { $ne: true },
+    $or: [{ undoneAt: null }, { undoneAt: { $exists: false } }]
+  })
+    .sort({ seq: 1 })
+    .select({ seq: 1, type: 1, payload: 1, isUndone: 1, undoneAt: 1 });
+
+  const rollbackEvents = rollbackEventsRaw.filter((event) => isActiveScoreEvent(event));
+  if (rollbackEvents.length !== rollbackSeqs.length) {
+    throw new AppError('Unable to resolve all events for correction.', 409, 'score.correction_invalid');
+  }
+  if (rollbackEvents.some((event) => !isDeliveryEvent(event))) {
+    throw new AppError(
+      'Only delivery events can be corrected from current over.',
+      409,
+      'score.correction_invalid'
+    );
+  }
+
+  const replayTail = [
+    ...rollbackEvents.slice(1),
+    ...trailingEvents
+  ].map((event) => mapEventDocToReplayInput(event));
+
+  const totalUndoCount = rollbackEvents.length + trailingEvents.length;
+  for (let i = 0; i < totalUndoCount; i += 1) {
+    await applyUndo({
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      createdByUserId: input.createdByUserId,
+      type: 'undo'
+    });
+  }
+
+  await applyEvent({
+    tenantId: input.tenantId,
+    matchId: input.matchId,
+    createdByUserId: input.createdByUserId,
+    ...replacement
+  } as ScoreEventInput);
+
+  for (const replayEvent of replayTail) {
+    await applyEvent({
+      ...replayEvent,
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      createdByUserId: input.createdByUserId
+    });
+  }
+
+  const refreshed = await getMatchScore(input.tenantId, input.matchId);
+  const lastEvent = (refreshed.lastEvent ??
+    {
+      id: `correction-${targetSeq}`,
+      seq: targetSeq,
+      type: 'correctBall'
+    }) as { id: string; seq: number; type: string };
+
+  return {
+    matchId: input.matchId,
+    inningsId: refreshed.inningsId ?? context.innings._id.toString(),
+    inningsCompleted: refreshed.inningsCompleted ?? false,
+    isMatchCompleted: refreshed.isMatchCompleted ?? false,
+    score: refreshed.score,
+    current: refreshed.current,
+    event: {
+      id: lastEvent.id,
+      seq: lastEvent.seq,
+      type: 'correctBall'
+    }
+  };
+};
+
 const emitLiveScoreUpdateAsync = (tenantId: string, matchId: string) => {
   void (async () => {
     try {
@@ -947,7 +1279,13 @@ const applyEvent = async (input: ScoreEventInput) => {
     eventInsertMs: 0,
     postMs: 0
   };
-  const context = await ensureLiveContext(input.tenantId, input.matchId, false, false);
+  const allowCompletedInningsForPenalty = input.type === 'penalty';
+  const context = await ensureLiveContext(
+    input.tenantId,
+    input.matchId,
+    allowCompletedInningsForPenalty,
+    false
+  );
   let rosterIds: { battingIds: Set<string>; bowlingIds: Set<string> } | null = null;
   const ensureRosterIds = async () => {
     if (rosterIds) {
@@ -1006,13 +1344,21 @@ const applyEvent = async (input: ScoreEventInput) => {
   const nextSeq = innings.eventSeq + 1;
   const maxLegalBalls = getMaxLegalBalls(innings, context.ballsPerOver);
 
-  if (maxLegalBalls > 0 && innings.balls >= maxLegalBalls) {
+  if (input.type !== 'penalty' && maxLegalBalls > 0 && innings.balls >= maxLegalBalls) {
     innings.status = 'COMPLETED';
     await innings.save();
     throw new AppError('Configured overs are completed.', 409, 'match.overs_completed');
   }
 
-  const beforeSnapshot = buildSnapshotFromState(innings, [striker, nonStriker], bowler);
+  const beforeAllBatters = await loadAllInningsBatters(
+    input.tenantId,
+    innings._id.toString()
+  );
+  const beforeSnapshot = buildSnapshotFromState(
+    innings,
+    beforeAllBatters.length > 0 ? beforeAllBatters : [striker, nonStriker],
+    bowler
+  );
   phase.preMs = Date.now() - startedAt;
 
   let createdBatterStatId: string | undefined;
@@ -1047,6 +1393,20 @@ const applyEvent = async (input: ScoreEventInput) => {
     createdBatterDoc = newBatter;
     registerBatter(newBatter);
     createdBatterStatId = newBatter._id.toString();
+  }
+
+  if (input.type === 'penalty') {
+    const penaltyRuns = Number(input.penaltyRuns ?? 0);
+    // Innings-level penalty adjustment should affect total only.
+    // Do not couple it to extras ledger; only prevent negative total runs.
+    if (innings.runs + penaltyRuns < 0) {
+      throw new AppError(
+        'Penalty adjustment cannot reduce score below zero.',
+        400,
+        'score.penalty_out_of_range'
+      );
+    }
+    innings.runs += penaltyRuns;
   }
 
   if (input.type === 'run') {
@@ -1527,9 +1887,15 @@ const applyEvent = async (input: ScoreEventInput) => {
     );
   }
 
+  const afterAllBatters = await loadAllInningsBatters(
+    input.tenantId,
+    innings._id.toString()
+  );
   const afterSnapshot = buildSnapshotFromState(
     innings,
-    [striker, nonStriker, currentStriker, currentNonStriker, createdBatterDoc],
+    afterAllBatters.length > 0
+      ? afterAllBatters
+      : [striker, nonStriker, currentStriker, currentNonStriker, createdBatterDoc],
     bowler
   );
 
@@ -1545,6 +1911,10 @@ const applyEvent = async (input: ScoreEventInput) => {
     isLegal: meta.isLegal,
     summaryDisplay: meta.summaryDisplay,
     payload: buildPayload(input, createdBatterStatId),
+    audit: {
+      source: 'scoring_panel',
+      action: input.type
+    },
     beforeSnapshot,
     afterSnapshot,
     createdByUserId: input.createdByUserId
@@ -1588,8 +1958,24 @@ export const scoreMatchEvent = async (input: ScoreEventInput) => {
     throw new AppError('Missing user context.', 401, 'auth.invalid_token');
   }
 
+  if (input.type === 'penalty') {
+    const parsedRuns =
+      input.penaltyRuns ??
+      (typeof (input as unknown as { runs?: unknown }).runs === 'number'
+        ? Number((input as unknown as { runs?: number }).runs)
+        : NaN);
+    if (!Number.isInteger(parsedRuns) || parsedRuns === 0) {
+      throw new AppError('Penalty runs must be a non-zero integer.', 400, 'score.penalty_invalid');
+    }
+    input.penaltyRuns = parsedRuns;
+  }
+
   if (input.type === 'undo') {
     return applyUndo(input);
+  }
+
+  if (input.type === 'correctBall') {
+    return applyCorrectBall(input);
   }
 
   return applyEvent(input);

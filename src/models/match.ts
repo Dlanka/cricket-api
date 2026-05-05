@@ -50,6 +50,45 @@ const tossSchema = new Schema(
   }
 );
 
+const matchTimeConfigSchema = new Schema(
+  {
+    totalMatchMinutes: {
+      type: Number,
+      min: 1
+    },
+    splitByInnings: {
+      type: Boolean,
+      default: false
+    }
+  },
+  {
+    _id: false
+  }
+);
+
+const matchTimerSchema = new Schema(
+  {
+    status: {
+      type: String,
+      enum: ['IDLE', 'RUNNING', 'PAUSED'],
+      default: 'IDLE',
+      required: true
+    },
+    accumulatedMs: {
+      type: Number,
+      min: 0,
+      default: 0,
+      required: true
+    },
+    lastResumedAt: {
+      type: Date
+    }
+  },
+  {
+    _id: false
+  }
+);
+
 const matchSchema = new Schema(
   {
     tenantId: {
@@ -73,7 +112,7 @@ const matchSchema = new Schema(
     },
     stage: {
       type: String,
-      enum: ['LEAGUE', 'R1', 'QF', 'SF', 'FINAL'],
+      enum: ['LEAGUE', 'R1', 'QF', 'SF', 'FINAL', 'THIRD_PLACE'],
       required: true
     },
     roundNumber: {
@@ -135,6 +174,14 @@ const matchSchema = new Schema(
     },
     toss: {
       type: tossSchema
+    },
+    timeConfig: {
+      type: matchTimeConfigSchema,
+      default: () => ({})
+    },
+    timer: {
+      type: matchTimerSchema,
+      default: () => ({})
     }
   },
   {

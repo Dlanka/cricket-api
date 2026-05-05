@@ -20,6 +20,7 @@ type ExtrasDto = {
   legByes: number;
   wides: number;
   noBalls: number;
+  penalties: number;
   total: number;
 };
 
@@ -70,6 +71,7 @@ type EventPayload = {
   extraType?: unknown;
   additionalRuns?: unknown;
   runsWithWicket?: unknown;
+  runs?: unknown;
   wicketType?: unknown;
   runOutBatsman?: unknown;
   batterName?: unknown;
@@ -123,6 +125,7 @@ const computeExtras = (
   let noBalls = 0;
   let byes = 0;
   let legByes = 0;
+  let penalties = 0;
 
   events.forEach((event) => {
     const payload = (asObject(event.payload) ?? {}) as EventPayload;
@@ -154,6 +157,10 @@ const computeExtras = (
         noBalls += 1;
       }
     }
+
+    if (event.type === 'penalty') {
+      penalties += asNumber(payload.runs, 0);
+    }
   });
 
   return {
@@ -161,7 +168,8 @@ const computeExtras = (
     legByes,
     wides,
     noBalls,
-    total: byes + legByes + wides + noBalls
+    penalties,
+    total: byes + legByes + wides + noBalls + penalties
   };
 };
 
@@ -570,5 +578,260 @@ export const getMatchSummary = async (tenantId: string, matchId: string) => {
       result
     },
     innings
+  };
+};
+
+type PlayerOfMatchAgg = {
+  playerId: string;
+  name: string;
+  teamId: string | null;
+  teamName: string | null;
+  teamShortName: string | null;
+  matches: Set<string>;
+  runs: number;
+  balls: number;
+  fours: number;
+  sixes: number;
+  wickets: number;
+  ballsBowled: number;
+  runsConceded: number;
+  fifties: number;
+  hundreds: number;
+  fiveWicketHauls: number;
+  catches: number;
+  runOuts: number;
+};
+
+const PLAYER_OF_MATCH_SCORING = {
+  run: 1,
+  wicket: 25,
+  four: 2,
+  six: 3,
+  fiftyBonus: 8,
+  hundredBonus: 16,
+  fiveWicketBonus: 20,
+  catch: 8,
+  runOut: 10
+} as const;
+
+export const getMatchPlayerOfMatch = async (tenantId: string, matchId: string) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(matchId, 'Invalid match id.');
+
+  const match = await scopedFindOne(MatchModel, tenantId, { _id: matchId }).select({
+    _id: 1,
+    teamAId: 1,
+    teamBId: 1,
+    status: 1
+  });
+  if (!match) {
+    throw new AppError('Match not found.', 404, 'match.not_found');
+  }
+
+  const innings = await scopedFind(InningsModel, tenantId, { matchId }).select({
+    _id: 1,
+    inningsNumber: 1,
+    ballsPerOver: 1
+  });
+  const inningsIds = innings.map((entry) => entry._id);
+  if (inningsIds.length === 0) {
+    return {
+      matchId: match._id.toString(),
+      winner: null,
+      leaderboard: [],
+      scoring: PLAYER_OF_MATCH_SCORING
+    };
+  }
+
+  const [batterRows, bowlerRows] = await Promise.all([
+    scopedFind(InningsBatterModel, tenantId, { inningsId: { $in: inningsIds } }).select({
+      inningsId: 1,
+      'playerRef.playerId': 1,
+      'playerRef.name': 1,
+      'batterKey.playerId': 1,
+      'batterKey.name': 1,
+      runs: 1,
+      balls: 1,
+      fours: 1,
+      sixes: 1,
+      outKind: 1,
+      outFielderId: 1
+    }),
+    scopedFind(InningsBowlerModel, tenantId, { inningsId: { $in: inningsIds } }).select({
+      inningsId: 1,
+      playerId: 1,
+      name: 1,
+      balls: 1,
+      runsConceded: 1,
+      wickets: 1
+    })
+  ]);
+
+  const inningsBallsPerOver = new Map(
+    innings.map((entry) => [entry._id.toString(), entry.ballsPerOver ?? 6])
+  );
+
+  const playerIds = new Set<string>();
+  batterRows.forEach((entry) => {
+    const batterId = entry.playerRef?.playerId?.toString() ?? entry.batterKey?.playerId?.toString();
+    if (batterId) playerIds.add(batterId);
+    const fielderId = entry.outFielderId?.toString();
+    if (fielderId) playerIds.add(fielderId);
+  });
+  bowlerRows.forEach((entry) => {
+    playerIds.add(entry.playerId.toString());
+  });
+
+  const players = playerIds.size
+    ? await PlayerModel.find({ tenantId, _id: { $in: [...playerIds] } }).select({
+        _id: 1,
+        fullName: 1,
+        teamId: 1
+      })
+    : [];
+
+  const teamIds = [...new Set(players.map((entry) => entry.teamId.toString()))];
+  const teams = teamIds.length
+    ? await TeamModel.find({ tenantId, _id: { $in: teamIds } }).select({ _id: 1, name: 1, shortName: 1 })
+    : [];
+
+  const playerMap = new Map(
+    players.map((entry) => [
+      entry._id.toString(),
+      {
+        name: entry.fullName,
+        teamId: entry.teamId.toString()
+      }
+    ])
+  );
+  const teamMap = new Map(
+    teams.map((entry) => [
+      entry._id.toString(),
+      {
+        id: entry._id.toString(),
+        name: entry.name,
+        shortName: entry.shortName ?? null
+      }
+    ])
+  );
+
+  const aggMap = new Map<string, PlayerOfMatchAgg>();
+  const ensureAgg = (playerId: string, fallbackName: string) => {
+    const existing = aggMap.get(playerId);
+    if (existing) return existing;
+    const player = playerMap.get(playerId);
+    const team = player?.teamId ? teamMap.get(player.teamId) : null;
+    const created: PlayerOfMatchAgg = {
+      playerId,
+      name: player?.name ?? fallbackName,
+      teamId: team?.id ?? null,
+      teamName: team?.name ?? null,
+      teamShortName: team?.shortName ?? null,
+      matches: new Set<string>([match._id.toString()]),
+      runs: 0,
+      balls: 0,
+      fours: 0,
+      sixes: 0,
+      wickets: 0,
+      ballsBowled: 0,
+      runsConceded: 0,
+      fifties: 0,
+      hundreds: 0,
+      fiveWicketHauls: 0,
+      catches: 0,
+      runOuts: 0
+    };
+    aggMap.set(playerId, created);
+    return created;
+  };
+
+  batterRows.forEach((entry) => {
+    const batterId = entry.playerRef?.playerId?.toString() ?? entry.batterKey?.playerId?.toString() ?? null;
+    const batterName = entry.playerRef?.name ?? entry.batterKey?.name ?? 'Unknown Player';
+    if (batterId) {
+      const agg = ensureAgg(batterId, batterName);
+      agg.runs += entry.runs;
+      agg.balls += entry.balls;
+      agg.fours += entry.fours;
+      agg.sixes += entry.sixes;
+      if (entry.runs >= 100) agg.hundreds += 1;
+      else if (entry.runs >= 50) agg.fifties += 1;
+    }
+
+    const fielderId = entry.outFielderId?.toString() ?? null;
+    if (fielderId) {
+      const fielderAgg = ensureAgg(fielderId, 'Unknown Player');
+      if (entry.outKind === 'caught') {
+        fielderAgg.catches += 1;
+      } else if (entry.outKind === 'runOut') {
+        fielderAgg.runOuts += 1;
+      }
+    }
+  });
+
+  bowlerRows.forEach((entry) => {
+    const bowlerId = entry.playerId.toString();
+    const agg = ensureAgg(bowlerId, entry.name || 'Unknown Player');
+    agg.wickets += entry.wickets;
+    agg.ballsBowled += entry.balls;
+    agg.runsConceded += entry.runsConceded;
+    if (entry.wickets >= 5) agg.fiveWicketHauls += 1;
+  });
+
+  const leaderboard = [...aggMap.values()]
+    .map((entry) => {
+      const ballsPerOver = inningsBallsPerOver.values().next().value ?? 6;
+      const oversBowled = entry.ballsBowled / ballsPerOver;
+      const strikeRate = entry.balls > 0 ? (entry.runs / entry.balls) * 100 : 0;
+      const economy = oversBowled > 0 ? entry.runsConceded / oversBowled : 0;
+      const points =
+        entry.runs * PLAYER_OF_MATCH_SCORING.run +
+        entry.wickets * PLAYER_OF_MATCH_SCORING.wicket +
+        entry.fours * PLAYER_OF_MATCH_SCORING.four +
+        entry.sixes * PLAYER_OF_MATCH_SCORING.six +
+        entry.fifties * PLAYER_OF_MATCH_SCORING.fiftyBonus +
+        entry.hundreds * PLAYER_OF_MATCH_SCORING.hundredBonus +
+        entry.fiveWicketHauls * PLAYER_OF_MATCH_SCORING.fiveWicketBonus +
+        entry.catches * PLAYER_OF_MATCH_SCORING.catch +
+        entry.runOuts * PLAYER_OF_MATCH_SCORING.runOut;
+
+      return {
+        playerId: entry.playerId,
+        name: entry.name,
+        team: entry.teamId
+          ? {
+              id: entry.teamId,
+              name: entry.teamName,
+              shortName: entry.teamShortName
+            }
+          : null,
+        matches: 1,
+        runs: entry.runs,
+        wickets: entry.wickets,
+        fours: entry.fours,
+        sixes: entry.sixes,
+        fifties: entry.fifties,
+        hundreds: entry.hundreds,
+        fiveWicketHauls: entry.fiveWicketHauls,
+        catches: entry.catches,
+        runOuts: entry.runOuts,
+        strikeRate: Number(strikeRate.toFixed(2)),
+        economy: Number(economy.toFixed(2)),
+        points: Number(points.toFixed(2))
+      };
+    })
+    .sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      if (b.wickets !== a.wickets) return b.wickets - a.wickets;
+      if (b.runs !== a.runs) return b.runs - a.runs;
+      return a.name.localeCompare(b.name);
+    })
+    .map((entry, index) => ({ rank: index + 1, ...entry }));
+
+  return {
+    matchId: match._id.toString(),
+    winner: leaderboard[0] ?? null,
+    leaderboard: leaderboard.slice(0, 10),
+    scoring: PLAYER_OF_MATCH_SCORING
   };
 };

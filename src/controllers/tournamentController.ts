@@ -36,7 +36,8 @@ const rulesSchema = z
         totalMatches: z.coerce.number().int().min(1),
         winsToClinch: z.coerce.number().int().min(1)
       })
-      .optional()
+      .optional(),
+    includeThirdPlaceMatch: z.coerce.boolean().optional()
   })
   .optional();
 const tournamentStageSchema = z
