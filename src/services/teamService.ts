@@ -12,6 +12,7 @@ export type TeamCreateInput = {
   shortName?: string;
   contactPerson?: string;
   contactNumber?: string;
+  group?: string | null;
 };
 
 export type TeamUpdateInput = {
@@ -19,6 +20,7 @@ export type TeamUpdateInput = {
   shortName?: string;
   contactPerson?: string | null;
   contactNumber?: string | null;
+  group?: string | null;
 };
 
 const ensureObjectId = (id: string, message: string) => {
@@ -70,6 +72,7 @@ export const createTeam = async (input: TeamCreateInput) => {
     shortName: input.shortName,
     contactPerson: input.contactPerson,
     contactNumber: input.contactNumber,
+    group: input.group?.trim() || null,
     sortOrder: nextSortOrder
   });
 
@@ -189,4 +192,70 @@ export const reorderTeamsByTournament = async (
   );
 
   return { updated: uniqueOrderedTeamIds.length };
+};
+
+export const autoAssignTeamsToGroups = async (
+  tenantId: string,
+  tournamentId: string,
+  groupCountInput?: number
+) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(tournamentId, 'Invalid tournament id.');
+
+  const tournament = await ensureTournament(tenantId, tournamentId);
+  const groupCount = groupCountInput ?? (tournament.rules as any)?.groupCount ?? 2;
+
+  if (groupCount < 2 || groupCount > 8) {
+    throw new AppError('groupCount must be between 2 and 8.', 400, 'validation.invalid_group_count');
+  }
+
+  const teams = await scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 });
+  if (teams.length < groupCount) {
+    throw new AppError(
+      `At least ${groupCount} teams are required to split into ${groupCount} groups.`,
+      400,
+      'team.insufficient_teams'
+    );
+  }
+
+  const groupLabels = ['Group A', 'Group B', 'Group C', 'Group D', 'Group E', 'Group F', 'Group G', 'Group H'];
+  const bulkOps = teams.map((team, index) => {
+    const groupName = groupLabels[index % groupCount];
+    return {
+      updateOne: {
+        filter: { _id: team._id, tenantId },
+        update: { $set: { group: groupName } }
+      }
+    };
+  });
+
+  await TeamModel.bulkWrite(bulkOps);
+  return scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 });
+};
+
+export const assignTeamsToGroups = async (
+  tenantId: string,
+  tournamentId: string,
+  assignments: Array<{ teamId: string; group?: string | null }>
+) => {
+  ensureObjectId(tenantId, 'Invalid tenant id.');
+  ensureObjectId(tournamentId, 'Invalid tournament id.');
+
+  await ensureTournament(tenantId, tournamentId);
+
+  const bulkOps = assignments.map(({ teamId, group }) => {
+    ensureObjectId(teamId, 'Invalid team id.');
+    return {
+      updateOne: {
+        filter: { _id: teamId, tenantId, tournamentId },
+        update: { $set: { group: group?.trim() || null } }
+      }
+    };
+  });
+
+  if (bulkOps.length > 0) {
+    await TeamModel.bulkWrite(bulkOps);
+  }
+
+  return scopedFind(TeamModel, tenantId, { tournamentId }).sort({ sortOrder: 1, createdAt: 1 });
 };

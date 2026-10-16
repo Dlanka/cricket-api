@@ -1305,14 +1305,38 @@ const applyEvent = async (input: ScoreEventInput) => {
       }).select({ playerId: 1 })
     ]);
 
-    if (battingRoster.length === 0 || bowlingRoster.length === 0) {
-      throw new AppError('Roster must exist for both teams.', 400, 'match.roster_missing');
-    }
+    // Check removed for roster exist for both teams
 
     rosterIds = {
       battingIds: new Set(battingRoster.map((entry) => entry.playerId.toString())),
       bowlingIds: new Set(bowlingRoster.map((entry) => entry.playerId.toString()))
     };
+
+    if (input.newBatterId && !rosterIds.battingIds.has(input.newBatterId)) {
+      await MatchPlayerModel.insertMany([{
+        tenantId: input.tenantId,
+        matchId: input.matchId,
+        teamId: context.innings.battingTeamId,
+        playerId: input.newBatterId,
+        isPlaying: true,
+        isCaptain: false,
+        isKeeper: false
+      }]);
+      rosterIds.battingIds.add(input.newBatterId);
+    }
+
+    if (input.fielderId && !rosterIds.bowlingIds.has(input.fielderId)) {
+      await MatchPlayerModel.insertMany([{
+        tenantId: input.tenantId,
+        matchId: input.matchId,
+        teamId: context.innings.bowlingTeamId,
+        playerId: input.fielderId,
+        isPlaying: true,
+        isCaptain: false,
+        isKeeper: false
+      }]);
+      rosterIds.bowlingIds.add(input.fielderId);
+    }
 
     return rosterIds;
   };

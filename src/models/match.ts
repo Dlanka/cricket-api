@@ -118,6 +118,10 @@ const matchSchema = new Schema(
     roundNumber: {
       type: Number
     },
+    group: {
+      type: String,
+      trim: true
+    },
     scheduledAt: {
       type: Date
     },

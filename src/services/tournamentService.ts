@@ -38,6 +38,9 @@ export type TournamentCreateInput = {
       winsToClinch?: number;
     };
     includeThirdPlaceMatch?: boolean;
+    hasGroups?: boolean;
+    groupCount?: number;
+    advancingPerGroup?: number;
   };
   stageStatus?: {
     league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -68,6 +71,9 @@ export type TournamentUpdateInput = {
       winsToClinch?: number;
     };
     includeThirdPlaceMatch?: boolean;
+    hasGroups?: boolean;
+    groupCount?: number;
+    advancingPerGroup?: number;
   };
   stageStatus?: {
     league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -85,6 +91,7 @@ type StandingRow = {
   teamId: string;
   teamName: string;
   shortName?: string;
+  group?: string | null;
   played: number;
   won: number;
   lost: number;
@@ -216,6 +223,9 @@ const validateTournamentConfig = (
       winsToClinch?: number | null;
     } | null;
     includeThirdPlaceMatch?: boolean;
+    hasGroups?: boolean;
+    groupCount?: number;
+    advancingPerGroup?: number;
   }
 ) => {
   const qualificationCount = rules?.qualificationCount;
@@ -274,6 +284,26 @@ const validateTournamentConfig = (
     if (rules?.includeThirdPlaceMatch !== undefined) {
       throw new AppError(
         'includeThirdPlaceMatch is supported only for LEAGUE_KNOCKOUT tournaments.',
+        400,
+        'tournament.invalid_rules'
+      );
+    }
+    return;
+  }
+
+  if (rules?.hasGroups) {
+    const groupCount = rules.groupCount ?? 2;
+    const advancingPerGroup = rules.advancingPerGroup ?? 2;
+    if (groupCount < 2 || groupCount > 8) {
+      throw new AppError('groupCount must be between 2 and 8.', 400, 'tournament.invalid_rules');
+    }
+    if (advancingPerGroup < 1 || advancingPerGroup > 4) {
+      throw new AppError('advancingPerGroup must be between 1 and 4.', 400, 'tournament.invalid_rules');
+    }
+    const totalAdvancing = groupCount * advancingPerGroup;
+    if (![2, 4, 8].includes(totalAdvancing)) {
+      throw new AppError(
+        'Group tournament configuration must result in 2, 4, or 8 qualifying teams for knockout.',
         400,
         'tournament.invalid_rules'
       );
@@ -341,6 +371,9 @@ const buildTournamentOverviewDescription = (
       qualificationCount?: number;
       series?: { totalMatches?: number | null; winsToClinch?: number | null } | null;
       includeThirdPlaceMatch?: boolean;
+    hasGroups?: boolean;
+    groupCount?: number;
+    advancingPerGroup?: number;
     };
     stageStatus?: {
       league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -380,9 +413,15 @@ const buildTournamentOverviewDescription = (
   }
 
   if (tournament.type === 'LEAGUE_KNOCKOUT') {
-    parts.push(
-      `Top ${tournament.rules?.qualificationCount ?? 4} teams qualify to knockout. Knockout stage is ${tournament.stageStatus?.knockout ?? 'PENDING'} (${counts.knockoutCompleted}/${counts.knockoutTotal} completed).`
-    );
+    if (tournament.rules?.hasGroups) {
+      parts.push(
+        `Top ${tournament.rules?.advancingPerGroup ?? 2} teams from each group qualify to knockout crossover matches. Knockout stage is ${tournament.stageStatus?.knockout ?? 'PENDING'} (${counts.knockoutCompleted}/${counts.knockoutTotal} completed).`
+      );
+    } else {
+      parts.push(
+        `Top ${tournament.rules?.qualificationCount ?? 4} teams qualify to knockout. Knockout stage is ${tournament.stageStatus?.knockout ?? 'PENDING'} (${counts.knockoutCompleted}/${counts.knockoutTotal} completed).`
+      );
+    }
     if (tournament.rules?.includeThirdPlaceMatch) {
       parts.push('Semi-final losing teams will play a 3rd-place playoff.');
     }
@@ -422,6 +461,9 @@ const buildTournamentOverview = (
       qualificationCount?: number;
       series?: { totalMatches?: number | null; winsToClinch?: number | null } | null;
       includeThirdPlaceMatch?: boolean;
+    hasGroups?: boolean;
+    groupCount?: number;
+    advancingPerGroup?: number;
     };
     stageStatus?: {
       league?: 'PENDING' | 'ACTIVE' | 'COMPLETED';
@@ -497,7 +539,10 @@ const buildTournamentOverview = (
       includeThirdPlaceMatch:
         tournament.type === 'LEAGUE_KNOCKOUT'
           ? (tournament.rules?.includeThirdPlaceMatch ?? false)
-          : false
+          : false,
+      hasGroups: Boolean(tournament.rules?.hasGroups),
+      groupCount: tournament.rules?.groupCount ?? null,
+      advancingPerGroup: tournament.rules?.advancingPerGroup ?? null
     },
     tiePolicy:
       tournament.type === 'LEAGUE' || tournament.type === 'SERIES'
@@ -527,6 +572,7 @@ const getLeagueStandingsRows = async (tenantId: string, tournamentId: string) =>
       teamId: team._id.toString(),
       teamName: team.name,
       shortName: team.shortName ?? undefined,
+      group: (team as any).group ?? null,
       played: 0,
       won: 0,
       lost: 0,
@@ -692,7 +738,10 @@ export const createTournament = async (input: TournamentCreateInput) => {
       includeThirdPlaceMatch:
         input.type === 'LEAGUE_KNOCKOUT'
           ? (input.rules?.includeThirdPlaceMatch ?? false)
-          : undefined
+          : undefined,
+      hasGroups: Boolean(input.rules?.hasGroups),
+      groupCount: input.rules?.hasGroups ? (input.rules?.groupCount ?? 2) : 2,
+      advancingPerGroup: input.rules?.hasGroups ? (input.rules?.advancingPerGroup ?? 2) : 2
     },
     stageStatus: {
       league: leagueStage,
@@ -744,7 +793,10 @@ export const duplicateTournament = async (input: DuplicateTournamentInput) => {
       includeThirdPlaceMatch:
         sourceTournament.type === 'LEAGUE_KNOCKOUT'
           ? sourceTournament.rules?.includeThirdPlaceMatch ?? false
-          : undefined
+          : undefined,
+      hasGroups: Boolean(sourceTournament.rules?.hasGroups),
+      groupCount: sourceTournament.rules?.groupCount ?? 2,
+      advancingPerGroup: sourceTournament.rules?.advancingPerGroup ?? 2
     },
     stageStatus: {
       league: 'PENDING',
@@ -767,7 +819,8 @@ export const duplicateTournament = async (input: DuplicateTournamentInput) => {
         contactPerson: team.contactPerson,
         contactNumber: team.contactNumber,
         sortOrder: team.sortOrder ?? 0,
-        sourceType: team.sourceType
+        sourceType: team.sourceType,
+        group: (team as any).group
       }))
     );
 
@@ -1605,27 +1658,80 @@ export const getTournamentStandings = async (tenantId: string, id: string) => {
     };
   }
 
+  const hasGroups = Boolean((tournament.rules as any)?.hasGroups);
+
+  const mappedItems = rows.map((row, index) => ({
+    rank: index + 1,
+    team: {
+      id: row.teamId,
+      name: row.teamName,
+      shortName: row.shortName ?? null
+    },
+    group: row.group ?? null,
+    played: row.played,
+    won: row.won,
+    lost: row.lost,
+    tied: row.tied,
+    noResult: row.noResult,
+    points: row.points,
+    netRunRate: row.netRunRate
+  }));
+
+  if (hasGroups) {
+    const groupsMap = new Map<string, typeof rows>();
+    rows.forEach((row) => {
+      const g = row.group?.trim() || 'Group A';
+      const list = groupsMap.get(g) ?? [];
+      list.push(row);
+      groupsMap.set(g, list);
+    });
+
+    const sortedGroupNames = [...groupsMap.keys()].sort();
+    const groups = sortedGroupNames.map((groupName) => {
+      const groupRows = groupsMap.get(groupName)!;
+      return {
+        groupName,
+        items: groupRows.map((row, index) => ({
+          rank: index + 1,
+          team: {
+            id: row.teamId,
+            name: row.teamName,
+            shortName: row.shortName ?? null
+          },
+          group: row.group ?? null,
+          played: row.played,
+          won: row.won,
+          lost: row.lost,
+          tied: row.tied,
+          noResult: row.noResult,
+          points: row.points,
+          netRunRate: row.netRunRate
+        }))
+      };
+    });
+
+    return {
+      tournamentId: tournament._id.toString(),
+      stage: 'LEAGUE',
+      hasGroups: true,
+      groupCount: (tournament.rules as any)?.groupCount ?? groups.length,
+      advancingPerGroup: (tournament.rules as any)?.advancingPerGroup ?? 2,
+      leagueCompleted: leagueMatchesCount > 0 && completedCount >= leagueMatchesCount,
+      totalLeagueMatches: leagueMatchesCount,
+      completedLeagueMatches: completedCount,
+      groups,
+      items: mappedItems
+    };
+  }
+
   return {
     tournamentId: tournament._id.toString(),
     stage: 'LEAGUE',
+    hasGroups: false,
     leagueCompleted: leagueMatchesCount > 0 && completedCount >= leagueMatchesCount,
     totalLeagueMatches: leagueMatchesCount,
     completedLeagueMatches: completedCount,
-    items: rows.map((row, index) => ({
-      rank: index + 1,
-      team: {
-        id: row.teamId,
-        name: row.teamName,
-        shortName: row.shortName ?? null
-      },
-      played: row.played,
-      won: row.won,
-      lost: row.lost,
-      tied: row.tied,
-      noResult: row.noResult,
-      points: row.points,
-      netRunRate: row.netRunRate
-    }))
+    items: mappedItems
   };
 };
 
@@ -1693,6 +1799,166 @@ export const generateKnockoutFromLeague = async (tenantId: string, id: string) =
 
   if (rows.length < 2) {
     throw new AppError('At least two teams are required for knockout.', 400, 'match.insufficient_teams');
+  }
+
+  const hasGroups = Boolean((tournament.rules as any)?.hasGroups);
+  if (hasGroups) {
+    const groupsMap = new Map<string, typeof rows>();
+    rows.forEach((row) => {
+      const g = row.group?.trim() || 'Group A';
+      const list = groupsMap.get(g) ?? [];
+      list.push(row);
+      groupsMap.set(g, list);
+    });
+
+    const advancingPerGroup = (tournament.rules as any)?.advancingPerGroup ?? 2;
+    const sortedGroupNames = [...groupsMap.keys()].sort();
+
+    for (const gName of sortedGroupNames) {
+      const gRows = groupsMap.get(gName)!;
+      if (gRows.length < advancingPerGroup) {
+        throw new AppError(
+          `Group ${gName} does not have enough teams (${gRows.length}) to advance ${advancingPerGroup} teams.`,
+          400,
+          'tournament.invalid_rules'
+        );
+      }
+    }
+
+    const matchesToCreate: Array<{
+      tenantId: string;
+      tournamentId: string;
+      teamAId: string;
+      teamBId: string;
+      stage: 'QF' | 'SF' | 'FINAL';
+      status: 'SCHEDULED';
+      roundNumber: number;
+      oversPerInnings: number;
+      ballsPerOver: number;
+    }> = [];
+
+    const oversPerInnings = tournament.oversPerInnings;
+    const ballsPerOver = tournament.ballsPerOver ?? 6;
+
+    if (sortedGroupNames.length === 2) {
+      const groupA = groupsMap.get(sortedGroupNames[0])!;
+      const groupB = groupsMap.get(sortedGroupNames[1])!;
+
+      if (advancingPerGroup === 2) {
+        // Crossover Semi-Finals: A1 vs B2, B1 vs A2
+        matchesToCreate.push(
+          {
+            tenantId,
+            tournamentId: id,
+            teamAId: groupA[0].teamId,
+            teamBId: groupB[1].teamId,
+            stage: 'SF',
+            status: 'SCHEDULED',
+            roundNumber: 1,
+            oversPerInnings,
+            ballsPerOver
+          },
+          {
+            tenantId,
+            tournamentId: id,
+            teamAId: groupB[0].teamId,
+            teamBId: groupA[1].teamId,
+            stage: 'SF',
+            status: 'SCHEDULED',
+            roundNumber: 1,
+            oversPerInnings,
+            ballsPerOver
+          }
+        );
+      } else if (advancingPerGroup === 1) {
+        // Final: A1 vs B1
+        matchesToCreate.push({
+          tenantId,
+          tournamentId: id,
+          teamAId: groupA[0].teamId,
+          teamBId: groupB[0].teamId,
+          stage: 'FINAL',
+          status: 'SCHEDULED',
+          roundNumber: 1,
+          oversPerInnings,
+          ballsPerOver
+        });
+      }
+    } else if (sortedGroupNames.length === 4) {
+      const g0 = groupsMap.get(sortedGroupNames[0])!;
+      const g1 = groupsMap.get(sortedGroupNames[1])!;
+      const g2 = groupsMap.get(sortedGroupNames[2])!;
+      const g3 = groupsMap.get(sortedGroupNames[3])!;
+
+      if (advancingPerGroup === 1) {
+        matchesToCreate.push(
+          {
+            tenantId,
+            tournamentId: id,
+            teamAId: g0[0].teamId,
+            teamBId: g1[0].teamId,
+            stage: 'SF',
+            status: 'SCHEDULED',
+            roundNumber: 1,
+            oversPerInnings,
+            ballsPerOver
+          },
+          {
+            tenantId,
+            tournamentId: id,
+            teamAId: g2[0].teamId,
+            teamBId: g3[0].teamId,
+            stage: 'SF',
+            status: 'SCHEDULED',
+            roundNumber: 1,
+            oversPerInnings,
+            ballsPerOver
+          }
+        );
+      } else if (advancingPerGroup === 2) {
+        matchesToCreate.push(
+          { tenantId, tournamentId: id, teamAId: g0[0].teamId, teamBId: g1[1].teamId, stage: 'QF', status: 'SCHEDULED', roundNumber: 1, oversPerInnings, ballsPerOver },
+          { tenantId, tournamentId: id, teamAId: g1[0].teamId, teamBId: g0[1].teamId, stage: 'QF', status: 'SCHEDULED', roundNumber: 1, oversPerInnings, ballsPerOver },
+          { tenantId, tournamentId: id, teamAId: g2[0].teamId, teamBId: g3[1].teamId, stage: 'QF', status: 'SCHEDULED', roundNumber: 1, oversPerInnings, ballsPerOver },
+          { tenantId, tournamentId: id, teamAId: g3[0].teamId, teamBId: g2[1].teamId, stage: 'QF', status: 'SCHEDULED', roundNumber: 1, oversPerInnings, ballsPerOver }
+        );
+      }
+    } else {
+      const qualified = sortedGroupNames.flatMap((g) => groupsMap.get(g)!.slice(0, advancingPerGroup));
+      const stage: KnockoutStage = resolveNextKnockoutStage(qualified.length) ?? 'FINAL';
+      for (let i = 0; i < qualified.length; i += 2) {
+        if (qualified[i + 1]) {
+          matchesToCreate.push({
+            tenantId,
+            tournamentId: id,
+            teamAId: qualified[i].teamId,
+            teamBId: qualified[i + 1].teamId,
+            stage: stage as any,
+            status: 'SCHEDULED',
+            roundNumber: 1,
+            oversPerInnings,
+            ballsPerOver
+          });
+        }
+      }
+    }
+
+    const created = await MatchModel.insertMany(matchesToCreate);
+    tournament.stageStatus = {
+      league: tournament.stageStatus?.league ?? 'COMPLETED',
+      knockout: 'ACTIVE'
+    };
+    await tournament.save();
+
+    return {
+      created: created.map((entry) => ({
+        id: entry._id.toString(),
+        stage: entry.stage,
+        roundNumber: entry.roundNumber,
+        teamAId: entry.teamAId.toString(),
+        teamBId: entry.teamBId?.toString() ?? null
+      }))
+    };
   }
 
   const qualificationCount = tournament.rules?.qualificationCount ?? 4;
@@ -1947,7 +2213,15 @@ export const updateTournament = async (
         updates.rules?.series?.winsToClinch ?? tournament.rules?.series?.winsToClinch ?? 2
     },
     includeThirdPlaceMatch:
-      updates.rules?.includeThirdPlaceMatch ?? tournament.rules?.includeThirdPlaceMatch ?? false
+      updates.rules?.includeThirdPlaceMatch ?? tournament.rules?.includeThirdPlaceMatch ?? false,
+    hasGroups:
+      updates.rules?.hasGroups !== undefined ? updates.rules.hasGroups : tournament.rules?.hasGroups,
+    groupCount:
+      updates.rules?.groupCount !== undefined ? updates.rules.groupCount : tournament.rules?.groupCount,
+    advancingPerGroup:
+      updates.rules?.advancingPerGroup !== undefined
+        ? updates.rules.advancingPerGroup
+        : tournament.rules?.advancingPerGroup
   };
 
   validateTournamentConfig(nextType, {
@@ -1960,7 +2234,10 @@ export const updateTournament = async (
     includeThirdPlaceMatch:
       nextType === 'LEAGUE_KNOCKOUT'
         ? mergedRules.includeThirdPlaceMatch
-        : updates.rules?.includeThirdPlaceMatch
+        : updates.rules?.includeThirdPlaceMatch,
+    hasGroups: mergedRules.hasGroups,
+    groupCount: mergedRules.groupCount,
+    advancingPerGroup: mergedRules.advancingPerGroup
   });
 
   if (nextType === 'LEAGUE_KNOCKOUT' && mergedRules.qualificationCount !== undefined) {
@@ -2018,7 +2295,10 @@ export const updateTournament = async (
       includeThirdPlaceMatch:
         nextType === 'LEAGUE_KNOCKOUT'
           ? (mergedRules.includeThirdPlaceMatch ?? false)
-          : false
+          : false,
+      hasGroups: Boolean(mergedRules.hasGroups),
+      groupCount: mergedRules.hasGroups ? (mergedRules.groupCount ?? 2) : 2,
+      advancingPerGroup: mergedRules.hasGroups ? (mergedRules.advancingPerGroup ?? 2) : 2
     };
   }
   if (updates.type !== undefined && updates.rules === undefined) {
@@ -2039,7 +2319,10 @@ export const updateTournament = async (
       includeThirdPlaceMatch:
         nextType === 'LEAGUE_KNOCKOUT'
           ? (mergedRules.includeThirdPlaceMatch ?? false)
-          : false
+          : false,
+      hasGroups: Boolean(mergedRules.hasGroups),
+      groupCount: mergedRules.hasGroups ? (mergedRules.groupCount ?? 2) : 2,
+      advancingPerGroup: mergedRules.hasGroups ? (mergedRules.advancingPerGroup ?? 2) : 2
     };
   }
   if (updates.stageStatus !== undefined) {

@@ -39,6 +39,10 @@ const teamSchema = new Schema(
       enum: ['TOURNAMENT_TEAM'],
       default: 'TOURNAMENT_TEAM',
       required: true
+    },
+    group: {
+      type: String,
+      trim: true
     }
   },
   {

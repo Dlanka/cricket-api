@@ -343,7 +343,10 @@ export const getOversForInnings = async (
     const summary = deriveSummary(event);
     const isLegal = deriveIsLegal(event);
     const runs = deriveRuns(event);
-    const overNumber = legalRemaining > 0 ? Math.floor((legalRemaining - 1) / ballsPerOver) : 0;
+    const overIndex = isLegal
+      ? (legalRemaining > 0 ? Math.floor((legalRemaining - 1) / ballsPerOver) : 0)
+      : Math.floor(legalRemaining / ballsPerOver);
+    const overNumber = overIndex + 1;
 
     if (!overMap.has(overNumber)) {
       overMap.set(overNumber, {

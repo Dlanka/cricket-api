@@ -7,6 +7,8 @@ import {
   deleteTeam,
   getTeamById,
   listTeamsByTournament,
+  assignTeamsToGroups,
+  autoAssignTeamsToGroups,
   reorderTeamsByTournament,
   updateTeam
 } from '../services/teamService';
@@ -20,7 +22,8 @@ const createTeamSchema = z.object({
     .trim()
     .min(1)
     .regex(/^[+0-9()\-.\s]{6,20}$/)
-    .optional()
+    .optional(),
+  group: z.string().trim().min(1).nullable().optional()
 });
 
 const updateTeamSchema = z
@@ -34,11 +37,25 @@ const updateTeamSchema = z
       .min(1)
       .regex(/^[+0-9()\-.\s]{6,20}$/)
       .nullable()
-      .optional()
+      .optional(),
+    group: z.string().trim().min(1).nullable().optional()
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: 'At least one field must be provided.'
   });
+
+const autoAssignGroupsSchema = z.object({
+  groupCount: z.number().int().min(2).max(8).optional()
+});
+
+const assignGroupsSchema = z.object({
+  assignments: z.array(
+    z.object({
+      teamId: z.string().min(1),
+      group: z.string().trim().min(1).nullable().optional()
+    })
+  ).min(1)
+});
 
 const idSchema = z.object({
   id: z.string().min(1)
@@ -124,6 +141,30 @@ export const deleteTeamHandler = async (req: Request, res: Response, next: NextF
     const tenantId = getTenantId(req);
     const result = await deleteTeam(tenantId, id);
     return res.status(200).json(ok(result));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const autoAssignTeamsHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { tournamentId } = tournamentIdSchema.parse(req.params);
+    const { groupCount } = autoAssignGroupsSchema.parse(req.body ?? {});
+    const tenantId = getTenantId(req);
+    const teams = await autoAssignTeamsToGroups(tenantId, tournamentId, groupCount);
+    return res.status(200).json(ok(teams));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const assignTeamsToGroupsHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { tournamentId } = tournamentIdSchema.parse(req.params);
+    const { assignments } = assignGroupsSchema.parse(req.body);
+    const tenantId = getTenantId(req);
+    const teams = await assignTeamsToGroups(tenantId, tournamentId, assignments);
+    return res.status(200).json(ok(teams));
   } catch (error) {
     return next(error);
   }

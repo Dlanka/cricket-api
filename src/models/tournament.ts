@@ -61,6 +61,22 @@ const tournamentRulesSchema = new Schema(
     includeThirdPlaceMatch: {
       type: Boolean,
       default: false
+    },
+    hasGroups: {
+      type: Boolean,
+      default: false
+    },
+    groupCount: {
+      type: Number,
+      min: 2,
+      max: 8,
+      default: 2
+    },
+    advancingPerGroup: {
+      type: Number,
+      min: 1,
+      max: 4,
+      default: 2
     }
   },
   {

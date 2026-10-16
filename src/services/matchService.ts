@@ -404,6 +404,7 @@ export const getTournamentFixturesView = async (tenantId: string, tournamentId: 
       return {
         id: entry._id.toString(),
         tournamentId: entry.tournamentId.toString(),
+        group: entry.group ?? null,
         stage,
         roundNumber: entry.roundNumber ?? 1,
         status: entry.status,
@@ -799,6 +800,91 @@ export const generateFixtures = async (
   }
 
   if (tournament.type === 'LEAGUE' || tournament.type === 'LEAGUE_KNOCKOUT') {
+    const hasGroups = Boolean((tournament.rules as any)?.hasGroups);
+
+    if (hasGroups) {
+      const groupCount = Math.max(2, Math.min(8, Number((tournament.rules as any)?.groupCount ?? 2)));
+      const groupLabels = ['Group A', 'Group B', 'Group C', 'Group D', 'Group E', 'Group F', 'Group G', 'Group H'].slice(0, groupCount);
+
+      // Check if teams already have valid group assignments matching active groupLabels
+      const invalidGroup = teams.some((team) => {
+        const g = (team as any).group?.trim();
+        return !g || !groupLabels.includes(g);
+      });
+      const distinctGroups = new Set(teams.map((t) => (t as any).group?.trim()).filter(Boolean));
+
+      if (invalidGroup || distinctGroups.size !== groupCount) {
+        // Auto-distribute teams evenly into the designated number of groups
+        const bulkOps = teams.map((team, index) => {
+          const assignedGroup = groupLabels[index % groupCount];
+          (team as any).group = assignedGroup;
+          return {
+            updateOne: {
+              filter: { _id: team._id, tenantId },
+              update: { $set: { group: assignedGroup } }
+            }
+          };
+        });
+        await TeamModel.bulkWrite(bulkOps);
+      }
+
+      const teamsByGroup = new Map<string, typeof teams>();
+      teams.forEach((team) => {
+        const groupName = ((team as any).group?.trim()) || 'Group A';
+        const list = teamsByGroup.get(groupName) ?? [];
+        list.push(team);
+        teamsByGroup.set(groupName, list);
+      });
+
+      for (const [groupName, groupTeams] of teamsByGroup.entries()) {
+        if (groupTeams.length < 2) {
+          throw new AppError(
+            `Every group must have at least 2 teams to generate fixtures (${groupName} has ${groupTeams.length}). Add more teams or reduce number of groups.`,
+            400,
+            'match.insufficient_teams_in_group'
+          );
+        }
+      }
+
+      const matches = [] as Array<{
+        tenantId: string;
+        tournamentId: string;
+        teamAId: string;
+        teamBId: string;
+        stage: 'LEAGUE';
+        group: string;
+        status: 'SCHEDULED';
+        roundNumber: number;
+        oversPerInnings: number;
+        ballsPerOver: number;
+      }>;
+
+      const sortedGroupNames = [...teamsByGroup.keys()].sort();
+      sortedGroupNames.forEach((groupName) => {
+        const groupTeams = teamsByGroup.get(groupName)!;
+        const rounds = generateRoundRobinRounds(groupTeams.map((team) => team._id.toString()));
+        rounds.forEach((roundMatches, index) => {
+          roundMatches.forEach((fixture) => {
+            matches.push({
+              tenantId,
+              tournamentId,
+              teamAId: fixture.teamAId,
+              teamBId: fixture.teamBId,
+              stage: 'LEAGUE',
+              group: groupName,
+              status: 'SCHEDULED',
+              roundNumber: index + 1,
+              oversPerInnings: tournament.oversPerInnings,
+              ballsPerOver: tournament.ballsPerOver ?? 6
+            });
+          });
+        });
+      });
+
+      await MatchModel.insertMany(matches);
+      return { created: matches.length };
+    }
+
     const rounds = generateRoundRobinRounds(teams.map((team) => team._id.toString()));
     const matches = [] as Array<{
       tenantId: string;
@@ -1179,7 +1265,7 @@ export const startMatch = async (input: StartMatchInput) => {
 
   ensureTeamIdsInMatch(match, input.battingTeamId, input.bowlingTeamId);
 
-  const [battingRoster, bowlingRoster] = await Promise.all([
+  let [battingRoster, bowlingRoster] = await Promise.all([
     scopedFind(MatchPlayerModel, input.tenantId, {
       matchId: input.matchId,
       teamId: input.battingTeamId,
@@ -1192,19 +1278,76 @@ export const startMatch = async (input: StartMatchInput) => {
     })
   ]);
 
-  if (battingRoster.length === 0 || bowlingRoster.length === 0) {
-    throw new AppError('Both teams must have roster before starting match.', 400, 'match.roster_missing');
+  // If batting roster is missing, seed it with the selected openers.
+  if (battingRoster.length === 0) {
+    const battingPlayerIds = [...new Set([input.strikerId, input.nonStrikerId])];
+    await MatchPlayerModel.insertMany(
+      battingPlayerIds.map((playerId) => ({
+        tenantId: input.tenantId,
+        matchId: input.matchId,
+        teamId: input.battingTeamId,
+        playerId,
+        isPlaying: true,
+        isCaptain: false,
+        isKeeper: false
+      }))
+    );
+    battingRoster = await scopedFind(MatchPlayerModel, input.tenantId, {
+      matchId: input.matchId,
+      teamId: input.battingTeamId,
+      isPlaying: true
+    });
+  }
+
+  // If bowling roster is missing, seed it with the selected bowler.
+  if (bowlingRoster.length === 0) {
+    await MatchPlayerModel.insertMany([{
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      teamId: input.bowlingTeamId,
+      playerId: input.bowlerId,
+      isPlaying: true,
+      isCaptain: false,
+      isKeeper: false
+    }]);
+    bowlingRoster = await scopedFind(MatchPlayerModel, input.tenantId, {
+      matchId: input.matchId,
+      teamId: input.bowlingTeamId,
+      isPlaying: true
+    });
   }
 
   const battingIds = new Set(battingRoster.map((entry) => entry.playerId.toString()));
   const bowlingIds = new Set(bowlingRoster.map((entry) => entry.playerId.toString()));
 
-  if (!battingIds.has(input.strikerId) || !battingIds.has(input.nonStrikerId)) {
-    throw new AppError('Opening batters must be in batting roster.', 400, 'match.batting_pair_invalid');
+  // Add any newly created players that are not yet in the roster.
+  const missingBatters = [input.strikerId, input.nonStrikerId].filter((id) => !battingIds.has(id));
+  if (missingBatters.length > 0) {
+    await MatchPlayerModel.insertMany(
+      missingBatters.map((playerId) => ({
+        tenantId: input.tenantId,
+        matchId: input.matchId,
+        teamId: input.battingTeamId,
+        playerId,
+        isPlaying: true,
+        isCaptain: false,
+        isKeeper: false
+      }))
+    );
+    missingBatters.forEach((id) => battingIds.add(id));
   }
 
   if (!bowlingIds.has(input.bowlerId)) {
-    throw new AppError('Bowler must be in bowling roster.', 400, 'match.bowler_invalid');
+    await MatchPlayerModel.insertMany([{
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      teamId: input.bowlingTeamId,
+      playerId: input.bowlerId,
+      isPlaying: true,
+      isCaptain: false,
+      isKeeper: false
+    }]);
+    bowlingIds.add(input.bowlerId);
   }
 
   const innings = await InningsModel.create({
@@ -1305,7 +1448,7 @@ export const changeCurrentBowler = async (input: ChangeCurrentBowlerInput) => {
     throw new AppError('Configured overs are completed.', 409, 'match.overs_completed');
   }
 
-  const bowlerInXI = await scopedFindOne(MatchPlayerModel, input.tenantId, {
+  let bowlerInXI = await scopedFindOne(MatchPlayerModel, input.tenantId, {
     matchId: input.matchId,
     teamId: innings.bowlingTeamId,
     playerId: input.bowlerId,
@@ -1313,7 +1456,15 @@ export const changeCurrentBowler = async (input: ChangeCurrentBowlerInput) => {
   });
 
   if (!bowlerInXI) {
-    throw new AppError('Bowler must be in bowling playing XI.', 400, 'match.bowler_invalid');
+    await MatchPlayerModel.insertMany([{
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      teamId: innings.bowlingTeamId,
+      playerId: input.bowlerId,
+      isPlaying: true,
+      isCaptain: false,
+      isKeeper: false
+    }]);
   }
 
   const isOverBoundary = innings.balls > 0 && innings.balls % ballsPerOver === 0;
@@ -1553,6 +1704,20 @@ export const changeOnFieldBatters = async (input: ChangeOnFieldBattersInput) => 
 
   const battingIds = new Set(battingRoster.map((r) => r.playerId.toString()));
 
+  const missingBatters = [input.strikerId, input.nonStrikerId].filter((id) => !battingIds.has(id));
+  if (missingBatters.length > 0) {
+    const newRosterDocs = missingBatters.map((playerId) => ({
+      tenantId: new (require('mongoose').Types.ObjectId)(input.tenantId),
+      matchId: new (require('mongoose').Types.ObjectId)(input.matchId),
+      teamId: innings.battingTeamId,
+      playerId: new (require('mongoose').Types.ObjectId)(playerId),
+      isPlaying: true,
+      role: 'player'
+    }));
+    await MatchPlayerModel.insertMany(newRosterDocs);
+    missingBatters.forEach((id) => battingIds.add(id));
+  }
+
   if (!battingIds.has(input.strikerId) || !battingIds.has(input.nonStrikerId)) {
     throw new AppError('Both batters must be in batting playing XI.', 400, 'match.batting_pair_invalid');
   }
@@ -1720,7 +1885,7 @@ export const startSecondInnings = async (input: StartSecondInningsInput) => {
   const firstInningsRuns = firstInnings.runs;
   const targetRuns = firstInningsRuns + 1;
 
-  const [battingRoster, bowlingRoster] = await Promise.all([
+  let [battingRoster, bowlingRoster] = await Promise.all([
     scopedFind(MatchPlayerModel, input.tenantId, {
       matchId: input.matchId,
       teamId: secondBattingTeamId,
@@ -1733,19 +1898,77 @@ export const startSecondInnings = async (input: StartSecondInningsInput) => {
     })
   ]);
 
-  if (battingRoster.length === 0 || bowlingRoster.length === 0) {
-    throw new AppError('Both teams must have roster before starting innings.', 400, 'match.roster_missing');
+  // If batting roster is empty, seed it with the openers
+  if (battingRoster.length === 0) {
+    const battingPlayerIds = [...new Set([input.strikerId, input.nonStrikerId])];
+    await MatchPlayerModel.insertMany(
+      battingPlayerIds.map((playerId) => ({
+        tenantId: input.tenantId,
+        matchId: input.matchId,
+        teamId: secondBattingTeamId,
+        playerId,
+        isPlaying: true,
+        isCaptain: false,
+        isKeeper: false
+      }))
+    );
+    battingRoster = await scopedFind(MatchPlayerModel, input.tenantId, {
+      matchId: input.matchId,
+      teamId: secondBattingTeamId,
+      isPlaying: true
+    });
+  }
+
+  // If bowling roster is empty, seed it with the selected bowler
+  if (bowlingRoster.length === 0) {
+    await MatchPlayerModel.insertMany([{
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      teamId: secondBowlingTeamId,
+      playerId: input.bowlerId,
+      isPlaying: true,
+      isCaptain: false,
+      isKeeper: false
+    }]);
+    bowlingRoster = await scopedFind(MatchPlayerModel, input.tenantId, {
+      matchId: input.matchId,
+      teamId: secondBowlingTeamId,
+      isPlaying: true
+    });
   }
 
   const battingIds = new Set(battingRoster.map((entry) => entry.playerId.toString()));
   const bowlingIds = new Set(bowlingRoster.map((entry) => entry.playerId.toString()));
 
-  if (!battingIds.has(input.strikerId) || !battingIds.has(input.nonStrikerId)) {
-    throw new AppError('Opening batters must be in batting roster.', 400, 'match.batting_pair_invalid');
+  // Add any newly created batters not yet in the roster
+  const missingBatters = [input.strikerId, input.nonStrikerId].filter((id) => !battingIds.has(id));
+  if (missingBatters.length > 0) {
+    await MatchPlayerModel.insertMany(
+      missingBatters.map((playerId) => ({
+        tenantId: input.tenantId,
+        matchId: input.matchId,
+        teamId: secondBattingTeamId,
+        playerId,
+        isPlaying: true,
+        isCaptain: false,
+        isKeeper: false
+      }))
+    );
+    missingBatters.forEach((id) => battingIds.add(id));
   }
 
+  // Add newly created bowler if not yet in the roster
   if (!bowlingIds.has(input.bowlerId)) {
-    throw new AppError('Bowler must be in bowling roster.', 400, 'match.bowler_invalid');
+    await MatchPlayerModel.insertMany([{
+      tenantId: input.tenantId,
+      matchId: input.matchId,
+      teamId: secondBowlingTeamId,
+      playerId: input.bowlerId,
+      isPlaying: true,
+      isCaptain: false,
+      isKeeper: false
+    }]);
+    bowlingIds.add(input.bowlerId);
   }
 
   const innings = await InningsModel.create({
